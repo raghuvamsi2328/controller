@@ -1,90 +1,168 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <title>Torrent Video Stream (MP4 & MKV) via WebSocket</title>
+  <meta charset="UTF-8" />
+  <title>Video Torrent Stream via WebSocket</title>
   <style>
-    video { width: 80vw; max-width: 800px; margin-top: 20px; display: block; }
-    #status { margin-top: 10px; }
+    body {
+      font-family: Arial, sans-serif;
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+    #status {
+      background: #f0f0f0;
+      padding: 10px;
+      border-radius: 5px;
+      margin: 10px 0;
+    }
+    #fileInfo {
+      background: #e8f5e8;
+      padding: 10px;
+      border-radius: 5px;
+      margin: 10px 0;
+      display: none;
+    }
+    #error {
+      background: #ffe8e8;
+      padding: 10px;
+      border-radius: 5px;
+      margin: 10px 0;
+      display: none;
+    }
+    .stats {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin: 10px 0;
+    }
+    .stat-box {
+      background: #f8f8f8;
+      padding: 10px;
+      border-radius: 5px;
+      text-align: center;
+    }
   </style>
 </head>
 <body>
-  <h1>Streaming Torrent Video (MP4 or MKV)</h1>
-  <video id="video" controls autoplay></video>
-  <div id="status">Connecting...</div>
+  <h1>Video Torrent Streaming (MP4/MKV only)</h1>
+  <div id="status">Connecting to WebSocket server...</div>
+  <div id="fileInfo"></div>
+  <div id="error"></div>
+  
+  <div class="stats">
+    <div class="stat-box">
+      <strong>Bytes Received</strong><br>
+      <span id="totalBytes">0</span>
+    </div>
+    <div class="stat-box">
+      <strong>Chunks Received</strong><br>
+      <span id="chunkCount">0</span>
+    </div>
+  </div>
+
   <script>
     const statusDiv = document.getElementById('status');
-    const video = document.getElementById('video');
-    const ws = new WebSocket('ws://localhost:8080');
+    const fileInfoDiv = document.getElementById('fileInfo');
+    const errorDiv = document.getElementById('error');
+    const totalBytesSpan = document.getElementById('totalBytes');
+    const chunkCountSpan = document.getElementById('chunkCount');
+    
+    const ws = new WebSocket('ws://localhost:3000');
 
-    ws.binaryType = 'arraybuffer';
+    // Accumulate received bytes count
+    let totalBytes = 0;
+    let chunkCount = 0;
+    let currentFile = null;
 
-    // Attempt to auto-detect supported codecs -- fallback logic
-    const codecs = [
-      'video/mp4; codecs="avc1.42E01E, mp4a.40.2"',    // MP4: H.264 + AAC
-      'video/webm; codecs="vp9,opus"',                 // WebM: VP9 + Opus
-      'video/webm; codecs="vp8,vorbis"',               // WebM: VP8 + Vorbis
-      'video/x-matroska; codecs="avc1.42E01E, mp4a.40.2"', // MKV: H.264 + AAC
-      'video/x-matroska; codecs="vp9,opus"',           // MKV: VP9 + Opus
-    ];
-    let mimeCodec = codecs.find(c => MediaSource.isTypeSupported(c));
+    ws.onopen = () => {
+      statusDiv.textContent = 'Connected to WebSocket server. Waiting for video files...';
+      console.log('WebSocket connection opened.');
+    };
 
-    if (!mimeCodec) {
-      statusDiv.textContent = "No supported video codecs found in browser.";
-    } else {
-      let mediaSource = new MediaSource();
-      let sourceBuffer = null;
-      let queue = [];
-      let streamingFinished = false;
-
-      video.src = URL.createObjectURL(mediaSource);
-
-      mediaSource.addEventListener('sourceopen', () => {
-        sourceBuffer = mediaSource.addSourceBuffer(mimeCodec);
-        sourceBuffer.mode = 'segments';
-
-        sourceBuffer.addEventListener('updateend', () => {
-          if (queue.length > 0 && !sourceBuffer.updating) {
-            sourceBuffer.appendBuffer(queue.shift());
-          }
-          if (streamingFinished && queue.length === 0 && !sourceBuffer.updating) {
-            mediaSource.endOfStream();
-            statusDiv.textContent = "Streaming complete.";
-          }
-        });
-      });
-
-      ws.onopen = () => {
-        statusDiv.textContent = `Connected to server, streaming with: ${mimeCodec}`;
-        console.log('WebSocket connection opened.');
-      };
-
-      ws.onmessage = (event) => {
-        if (typeof event.data === 'string' && event.data === 'done') {
-          streamingFinished = true;
-          if (queue.length === 0 && sourceBuffer && !sourceBuffer.updating) {
-            mediaSource.endOfStream();
-            statusDiv.textContent = "Streaming complete.";
-          }
-          return;
+    ws.onmessage = (event) => {
+      try {
+        const message = JSON.parse(event.data);
+        
+        switch(message.type) {
+          case 'connected':
+            statusDiv.textContent = message.message;
+            break;
+            
+          case 'fileInfo':
+            currentFile = message;
+            fileInfoDiv.innerHTML = `
+              <strong>Streaming:</strong> ${message.name}<br>
+              <strong>File Size:</strong> ${formatBytes(message.size)}<br>
+              <strong>Video Files Found:</strong> ${message.totalFiles}
+            `;
+            fileInfoDiv.style.display = 'block';
+            statusDiv.textContent = 'Streaming video file...';
+            break;
+            
+          case 'chunk':
+            // Process video chunk
+            const chunkSize = message.size;
+            totalBytes += chunkSize;
+            chunkCount++;
+            
+            totalBytesSpan.textContent = formatBytes(totalBytes);
+            chunkCountSpan.textContent = chunkCount.toLocaleString();
+            
+            if (currentFile) {
+              const progress = ((totalBytes / currentFile.size) * 100).toFixed(1);
+              statusDiv.textContent = `Streaming: ${progress}% (${formatBytes(totalBytes)} / ${formatBytes(currentFile.size)})`;
+            }
+            
+            console.log(`Received chunk: ${chunkSize} bytes`);
+            // Here you can process the video chunk data (message.data contains the byte array)
+            break;
+            
+          case 'streamEnd':
+            statusDiv.textContent = message.message;
+            console.log('Stream ended:', message.message);
+            break;
+            
+          case 'streamError':
+            errorDiv.textContent = message.message;
+            errorDiv.style.display = 'block';
+            console.error('Stream error:', message.message);
+            break;
+            
+          case 'error':
+            errorDiv.textContent = message.message;
+            errorDiv.style.display = 'block';
+            statusDiv.textContent = 'No video files found in torrent';
+            console.error('Error:', message.message);
+            break;
+            
+          default:
+            console.log('Unknown message type:', message.type);
         }
-        if (sourceBuffer && !sourceBuffer.updating && queue.length === 0) {
-          sourceBuffer.appendBuffer(new Uint8Array(event.data));
-        } else {
-          queue.push(new Uint8Array(event.data));
-        }
-        statusDiv.textContent = `Streaming video... Received ${(video.buffered.length > 0 ? (video.buffered.end(0) * 1000).toFixed(0) : 0)} ms`;
-      };
+      } catch (err) {
+        console.error('Error parsing message:', err);
+      }
+    };
 
-      ws.onerror = (error) => {
-        statusDiv.textContent = 'WebSocket error!';
-        console.error('WebSocket error:', error);
-      };
+    ws.onerror = (error) => {
+      statusDiv.textContent = 'WebSocket error!';
+      errorDiv.textContent = 'Connection error occurred';
+      errorDiv.style.display = 'block';
+      console.error('WebSocket error:', error);
+    };
 
-      ws.onclose = () => {
-        statusDiv.textContent = 'WebSocket connection closed.';
-        console.log('WebSocket connection closed.');
-      };
+    ws.onclose = () => {
+      statusDiv.textContent = 'WebSocket connection closed.';
+      console.log('WebSocket connection closed.');
+    };
+    
+    // Helper function to format bytes
+    function formatBytes(bytes) {
+      if (bytes === 0) return '0 Bytes';
+      const k = 1024;
+      const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+      const i = Math.floor(Math.log(bytes) / Math.log(k));
+      return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
     }
   </script>
 </body>

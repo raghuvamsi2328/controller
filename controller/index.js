@@ -21,27 +21,88 @@ torrent.on('metadata', () => {
   console.log('Torrent metadata loaded:', torrent.name);
   console.log('Number of files:', torrent.files.length);
   console.log('Total size:', torrent.length, 'bytes');
-  const file = torrent.files[0]; // Streaming first file only for simplicity
+  
+  // Filter only MP4 and MKV files
+  const videoFiles = torrent.files.filter(file => {
+    const extension = file.name.toLowerCase().split('.').pop();
+    return extension === 'mp4' || extension === 'mkv';
+  });
+  
+  console.log('Video files found:', videoFiles.length);
+  videoFiles.forEach((file, index) => {
+    console.log(`${index + 1}. ${file.name} (${file.length} bytes)`);
+  });
+  
+  if (videoFiles.length === 0) {
+    console.log('No MP4 or MKV files found in this torrent');
+    // Notify WebSocket clients that no video files were found
+    wss.clients.forEach(ws => {
+      if (ws.readyState === 1) {
+        ws.send(JSON.stringify({
+          type: 'error',
+          message: 'No MP4 or MKV files found in this torrent'
+        }));
+      }
+    });
+    return;
+  }
+  
+  // Stream the first video file found (you can modify this to stream multiple files)
+  const file = videoFiles[0];
+  console.log(`Starting to stream: ${file.name}`);
+  
+  // Send file info to WebSocket clients
+  wss.clients.forEach(ws => {
+    if (ws.readyState === 1) {
+      ws.send(JSON.stringify({
+        type: 'fileInfo',
+        name: file.name,
+        size: file.length,
+        totalFiles: videoFiles.length
+      }));
+    }
+  });
+  
   const stream = file.createReadStream();
 
   stream.on('data', chunk => {
     bufferChunks.push(chunk); // Buffer for new clients
-    // Send chunk to all connected clients
+    // Send chunk to all connected clients with metadata
     wss.clients.forEach(ws => {
       if (ws.readyState === 1) { // WebSocket.OPEN
-        ws.send(chunk);
+        // Send chunk with type identifier
+        ws.send(JSON.stringify({
+          type: 'chunk',
+          data: Array.from(new Uint8Array(chunk)),
+          size: chunk.length
+        }));
       }
     });
-    console.log(`Sent chunk of size: ${chunk.length} bytes`);
+    console.log(`Sent chunk of size: ${chunk.length} bytes (${file.name})`);
   });
 
   stream.on('end', () => {
     wss.clients.forEach(ws => {
       if (ws.readyState === 1) { // WebSocket.OPEN
-        ws.send('done');
+        ws.send(JSON.stringify({
+          type: 'streamEnd',
+          message: `Streaming complete for ${file.name}`
+        }));
       }
     });
-    console.log('Streaming complete.');
+    console.log(`Streaming complete for: ${file.name}`);
+  });
+
+  stream.on('error', (err) => {
+    console.error(`Stream error for ${file.name}:`, err);
+    wss.clients.forEach(ws => {
+      if (ws.readyState === 1) {
+        ws.send(JSON.stringify({
+          type: 'streamError',
+          message: `Stream error: ${err.message}`
+        }));
+      }
+    });
   });
 });
 
@@ -68,17 +129,38 @@ client.on('error', err => {
 });
 
 // WebSocket server setup
-console.log('WebSocket server starting on port 8000...');
+console.log('WebSocket server starting on port 3000...');
 
 wss.on('listening', () => {
-  console.log('WebSocket server is listening on port 8000');
+  console.log('WebSocket server is listening on port 3000');
 });
 
 wss.on('connection', ws => {
   console.log('New browser client connected');
+  
+  // Send connection acknowledgment
+  ws.send(JSON.stringify({
+    type: 'connected',
+    message: 'Connected to WebTorrent streaming server'
+  }));
+  
+  // Send all buffered chunks to new client
   bufferChunks.forEach(chunk => {
     if (ws.readyState === 1) { // WebSocket.OPEN
-      ws.send(chunk);
+      ws.send(JSON.stringify({
+        type: 'chunk',
+        data: Array.from(new Uint8Array(chunk)),
+        size: chunk.length
+      }));
     }
+  });
+  
+  // Handle client disconnection
+  ws.on('close', () => {
+    console.log('Browser client disconnected');
+  });
+  
+  ws.on('error', (err) => {
+    console.error('WebSocket client error:', err);
   });
 });
