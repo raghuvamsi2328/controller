@@ -63,10 +63,10 @@
 
   <div style="margin: 20px 0;">
     <button id="testVideoBtn" style="padding: 10px 20px; background: #007bff; color: white; border: none; border-radius: 5px; cursor: pointer;">
-      🎬 Test Video Player (Demo Mode)
+      🎬 Enable Video Player (for WebSocket chunks)
     </button>
     <small style="display: block; margin-top: 5px; color: #666;">
-      Click to test the video player with a sample video file
+      Click to prepare video player for streaming chunks from WebSocket
     </small>
   </div>
 
@@ -148,9 +148,15 @@
             playbackInfo.textContent = 'Error: Video format not compatible with browser';
           });
           
-          playbackInfo.textContent = 'Ready to play video. Buffering...';
+          playbackInfo.textContent = 'Ready to receive video chunks from WebSocket...';
           videoContainer.style.display = 'block';
           setupVideoControls();
+          
+          // Process any chunks that arrived before MediaSource was ready
+          if (chunks.length > 0) {
+            console.log(`Processing ${chunks.length} queued chunks`);
+            appendNextChunk();
+          }
         } catch (e) {
           console.error('Error creating SourceBuffer:', e);
           playbackInfo.textContent = 'Error: Cannot create video buffer. Format may not be supported.';
@@ -257,12 +263,13 @@
       if (chunks.length > 0 && sourceBuffer && !sourceBuffer.updating && !isAppending) {
         isAppending = true;
         const chunk = chunks.shift();
+        console.log(`Appending chunk to video buffer. Size: ${chunk.length} bytes, Remaining: ${chunks.length}`);
         try {
           sourceBuffer.appendBuffer(chunk);
         } catch (e) {
           console.error('Error appending buffer:', e);
           isAppending = false;
-          playbackInfo.textContent = 'Error appending video data';
+          playbackInfo.textContent = 'Error appending video data: ' + e.message;
         }
       }
     }
@@ -271,9 +278,13 @@
       // chunkData is already a Uint8Array from ArrayBuffer
       chunks.push(chunkData);
       
-      // Start appending if not already doing so
-      if (sourceBuffer && !isAppending) {
+      console.log(`Added video chunk to buffer. Queue size: ${chunks.length}`);
+      
+      // Start appending if MediaSource and SourceBuffer are ready
+      if (sourceBuffer && !isAppending && mediaSource && mediaSource.readyState === 'open') {
         appendNextChunk();
+      } else {
+        console.log('MediaSource not ready, chunk queued for later');
       }
     }
 
@@ -298,22 +309,19 @@
         <strong>Video Files Found:</strong> ${demoFile.totalFiles}
       `;
       fileInfoDiv.style.display = 'block';
-      statusDiv.textContent = 'Demo mode: Video player ready';
+      statusDiv.textContent = 'Demo mode: Waiting for WebSocket chunks to play video';
       
-      // Initialize video player for demo
+      // Initialize video player for demo - this will use MediaSource API for chunks
       initializeMediaSource(demoFile.name);
       
-      // Use a sample video URL for testing (Big Buck Bunny - Creative Commons)
-      videoPlayer.src = 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4';
-      videoContainer.style.display = 'block';
-      playbackInfo.textContent = 'Demo video loaded - click play to test';
-      setupVideoControls();
+      // Hide the demo button since we're now in streaming mode
+      testVideoBtn.style.display = 'none';
     });
 
     ws.onmessage = (event) => {
       // Handle both binary chunks and JSON messages
       if (event.data instanceof ArrayBuffer) {
-        // Binary chunk received
+        // Binary chunk received - this is video data
         const chunkSize = event.data.byteLength;
         totalBytes += chunkSize;
         chunkCount++;
@@ -326,11 +334,16 @@
           statusDiv.textContent = `Streaming: ${progress}% (${formatBytes(totalBytes)} / ${formatBytes(currentFile.size)})`;
         }
         
-        console.log(`Received binary chunk: ${chunkSize} bytes`);
+        console.log(`Received binary video chunk: ${chunkSize} bytes`);
         
-        // Add chunk to video player
-        if (mediaSource && mediaSource.readyState === 'open') {
+        // Add chunk to video player for playback
+        if (mediaSource && mediaSource.readyState === 'open' && sourceBuffer) {
           addVideoChunk(new Uint8Array(event.data));
+          playbackInfo.textContent = `Playing video... Chunks: ${chunkCount}, Buffered: ${formatBytes(totalBytes)}`;
+        } else {
+          console.log('MediaSource not ready, chunk queued');
+          // Store chunk for later if MediaSource isn't ready yet
+          chunks.push(new Uint8Array(event.data));
         }
         return;
       }
