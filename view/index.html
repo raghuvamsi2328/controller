@@ -1,49 +1,91 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <title>Torrent Stream via WebSocket</title>
+  <meta charset="UTF-8">
+  <title>Torrent Video Stream (MP4 & MKV) via WebSocket</title>
+  <style>
+    video { width: 80vw; max-width: 800px; margin-top: 20px; display: block; }
+    #status { margin-top: 10px; }
+  </style>
 </head>
 <body>
-  <h1>Streaming Torrent Data</h1>
+  <h1>Streaming Torrent Video (MP4 or MKV)</h1>
+  <video id="video" controls autoplay></video>
   <div id="status">Connecting...</div>
   <script>
     const statusDiv = document.getElementById('status');
-    const ws = new WebSocket('ws://localhost:3000');
+    const video = document.getElementById('video');
+    const ws = new WebSocket('ws://localhost:8080');
 
-    // Accumulate received bytes count
-    let totalBytes = 0;
+    ws.binaryType = 'arraybuffer';
 
-    ws.binaryType = 'arraybuffer';  // Expect binary data
+    // Attempt to auto-detect supported codecs -- fallback logic
+    const codecs = [
+      'video/mp4; codecs="avc1.42E01E, mp4a.40.2"',    // MP4: H.264 + AAC
+      'video/webm; codecs="vp9,opus"',                 // WebM: VP9 + Opus
+      'video/webm; codecs="vp8,vorbis"',               // WebM: VP8 + Vorbis
+      'video/x-matroska; codecs="avc1.42E01E, mp4a.40.2"', // MKV: H.264 + AAC
+      'video/x-matroska; codecs="vp9,opus"',           // MKV: VP9 + Opus
+    ];
+    let mimeCodec = codecs.find(c => MediaSource.isTypeSupported(c));
 
-    ws.onopen = () => {
-      statusDiv.textContent = 'Connected to WebSocket server.';
-      console.log('WebSocket connection opened.');
-    };
+    if (!mimeCodec) {
+      statusDiv.textContent = "No supported video codecs found in browser.";
+    } else {
+      let mediaSource = new MediaSource();
+      let sourceBuffer = null;
+      let queue = [];
+      let streamingFinished = false;
 
-    ws.onmessage = (event) => {
-      if (typeof event.data === 'string' && event.data === 'done') {
-        statusDiv.textContent = 'Streaming complete.';
-        console.log('Received stream end signal.');
-      } else {
-        // Binary chunk received
-        const chunkSize = event.data.byteLength;
-        totalBytes += chunkSize;
-        statusDiv.textContent = `Received ${totalBytes} bytes so far...`;
-        console.log(`Received chunk: ${chunkSize} bytes`);
-        // Here, you can buffer chunks and feed to MediaSource for playback later.
-      }
-    };
+      video.src = URL.createObjectURL(mediaSource);
 
-    ws.onerror = (error) => {
-      statusDiv.textContent = 'WebSocket error!';
-      console.error('WebSocket error:', error);
-    };
+      mediaSource.addEventListener('sourceopen', () => {
+        sourceBuffer = mediaSource.addSourceBuffer(mimeCodec);
+        sourceBuffer.mode = 'segments';
 
-    ws.onclose = () => {
-      statusDiv.textContent = 'WebSocket connection closed.';
-      console.log('WebSocket connection closed.');
-    };
+        sourceBuffer.addEventListener('updateend', () => {
+          if (queue.length > 0 && !sourceBuffer.updating) {
+            sourceBuffer.appendBuffer(queue.shift());
+          }
+          if (streamingFinished && queue.length === 0 && !sourceBuffer.updating) {
+            mediaSource.endOfStream();
+            statusDiv.textContent = "Streaming complete.";
+          }
+        });
+      });
+
+      ws.onopen = () => {
+        statusDiv.textContent = `Connected to server, streaming with: ${mimeCodec}`;
+        console.log('WebSocket connection opened.');
+      };
+
+      ws.onmessage = (event) => {
+        if (typeof event.data === 'string' && event.data === 'done') {
+          streamingFinished = true;
+          if (queue.length === 0 && sourceBuffer && !sourceBuffer.updating) {
+            mediaSource.endOfStream();
+            statusDiv.textContent = "Streaming complete.";
+          }
+          return;
+        }
+        if (sourceBuffer && !sourceBuffer.updating && queue.length === 0) {
+          sourceBuffer.appendBuffer(new Uint8Array(event.data));
+        } else {
+          queue.push(new Uint8Array(event.data));
+        }
+        statusDiv.textContent = `Streaming video... Received ${(video.buffered.length > 0 ? (video.buffered.end(0) * 1000).toFixed(0) : 0)} ms`;
+      };
+
+      ws.onerror = (error) => {
+        statusDiv.textContent = 'WebSocket error!';
+        console.error('WebSocket error:', error);
+      };
+
+      ws.onclose = () => {
+        statusDiv.textContent = 'WebSocket connection closed.';
+        console.log('WebSocket connection closed.');
+      };
+    }
   </script>
 </body>
 </html>
