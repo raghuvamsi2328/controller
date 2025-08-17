@@ -11,6 +11,30 @@
             background: #f0f0f0;
         }
         
+        .input-section {
+            margin: 20px 0;
+            padding: 20px;
+            background: #f8f9fa;
+            border-radius: 10px;
+            border: 1px solid #ddd;
+        }
+        
+        #magnetInput {
+            width: 70%;
+            padding: 10px;
+            margin: 10px 5px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-family: monospace;
+            font-size: 14px;
+        }
+        
+        #magnetInput:focus {
+            outline: none;
+            border-color: #007bff;
+            box-shadow: 0 0 5px rgba(0,123,255,0.3);
+        }
+        
         .container {
             max-width: 800px;
             margin: 0 auto;
@@ -69,6 +93,14 @@
     <div class="container">
         <h1>Simple WebSocket Video Player</h1>
         
+        <!-- Magnet Link Input -->
+        <div class="input-section">
+            <h3>Enter Torrent Magnet Link or Hash:</h3>
+            <input type="text" id="magnetInput" placeholder="magnet:?xt=urn:btih:... or just the 40-character hash" />
+            <button onclick="startStream()">Start Stream</button>
+            <button onclick="startDefault()">Use Default (Big Buck Bunny)</button>
+        </div>
+        
         <video id="videoPlayer" controls autoplay muted></video>
         
         <div class="controls">
@@ -103,6 +135,53 @@
         const totalBytesEl = document.getElementById('totalBytes');
         const bufferedEl = document.getElementById('buffered');
         const logs = document.getElementById('logs');
+        const magnetInput = document.getElementById('magnetInput');
+
+        // Simple logging
+        function log(message) {
+            const timestamp = new Date().toLocaleTimeString();
+            logs.innerHTML += `[${timestamp}] ${message}<br>`;
+            logs.scrollTop = logs.scrollHeight;
+            console.log(message);
+        }
+
+        // Start stream with custom magnet link
+        function startStream() {
+            const magnetLink = magnetInput.value.trim();
+            if (!magnetLink) {
+                log('Please enter a magnet link or hash');
+                return;
+            }
+            
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                log(`Starting stream with: ${magnetLink.substring(0, 50)}...`);
+                ws.send(JSON.stringify({
+                    type: 'setMagnetLink',
+                    magnetLink: magnetLink
+                }));
+            } else {
+                log('WebSocket not connected');
+            }
+        }
+
+        // Start with default torrent
+        function startDefault() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                log('Starting default stream (Big Buck Bunny)');
+                ws.send(JSON.stringify({
+                    type: 'startDefault'
+                }));
+            } else {
+                log('WebSocket not connected');
+            }
+        }
+
+        // Allow Enter key to start stream
+        magnetInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                startStream();
+            }
+        });
 
         // Simple logging
         function log(message) {
