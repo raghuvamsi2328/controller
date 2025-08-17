@@ -24,6 +24,8 @@ const client = new WebTorrent();
 const wss = new WebSocketServer({ port: 3001 });
 
 let bufferChunks = [];
+let isStreaming = false;
+let currentFileInfo = null;
 
 // Function to check if video needs transcoding
 function needsTranscoding(filename) {
@@ -62,7 +64,8 @@ function createTranscodingStream(inputStream, filename) {
       '-crf 28', // Good quality balance for streaming
       '-maxrate 2M', // Limit bitrate for smoother streaming
       '-bufsize 4M', // Buffer size
-      '-movflags frag_keyframe+empty_moov', // Enable progressive streaming
+      '-movflags frag_keyframe+empty_moov+default_base_moof', // Enable progressive streaming with proper fragmentation
+      '-frag_duration 1000000', // 1 second fragments
       '-f mp4' // Force MP4 format
     ]);
   
@@ -168,17 +171,23 @@ torrent.on('metadata', () => {
   }
   
   // Send file info to WebSocket clients
+  currentFileInfo = {
+    type: 'fileInfo',
+    name: file.name,
+    size: file.length,
+    totalFiles: videoFiles.length,
+    transcoding: requiresTranscoding
+  };
+  
   wss.clients.forEach(ws => {
     if (ws.readyState === 1) {
-      ws.send(JSON.stringify({
-        type: 'fileInfo',
-        name: file.name,
-        size: file.length,
-        totalFiles: videoFiles.length,
-        transcoding: requiresTranscoding
-      }));
+      ws.send(JSON.stringify(currentFileInfo));
     }
   });
+  
+  // Clear previous buffer and reset streaming state
+  bufferChunks = [];
+  isStreaming = true;
   
   const originalStream = file.createReadStream();
   
@@ -188,18 +197,29 @@ torrent.on('metadata', () => {
     originalStream;
 
   stream.on('data', chunk => {
-    bufferChunks.push(chunk); // Buffer for new clients
+    if (!isStreaming) return;
+    
+    // Limit buffer size to prevent memory issues (keep last 50 chunks)
+    bufferChunks.push(chunk);
+    if (bufferChunks.length > 50) {
+      bufferChunks.shift(); // Remove oldest chunk
+    }
+    
     // Send chunk to all connected clients
     wss.clients.forEach(ws => {
       if (ws.readyState === 1) { // WebSocket.OPEN
-        // Send raw binary data for better performance
-        ws.send(chunk);
+        try {
+          ws.send(chunk);
+        } catch (error) {
+          console.error('Error sending chunk to client:', error.message);
+        }
       }
     });
     console.log(`Sent chunk of size: ${chunk.length} bytes (${file.name})`);
   });
 
   stream.on('end', () => {
+    isStreaming = false;
     wss.clients.forEach(ws => {
       if (ws.readyState === 1) { // WebSocket.OPEN
         ws.send(JSON.stringify({
@@ -213,6 +233,7 @@ torrent.on('metadata', () => {
 
   stream.on('error', (err) => {
     console.error(`Stream error for ${file.name}:`, err);
+    isStreaming = false;
     wss.clients.forEach(ws => {
       if (ws.readyState === 1) {
         ws.send(JSON.stringify({
@@ -262,12 +283,24 @@ wss.on('connection', ws => {
     message: 'Connected to WebTorrent streaming server'
   }));
   
-  // Send all buffered chunks to new client (raw binary data)
-  bufferChunks.forEach(chunk => {
-    if (ws.readyState === 1) { // WebSocket.OPEN
-      ws.send(chunk);
-    }
-  });
+  // Send current file info if available
+  if (currentFileInfo) {
+    ws.send(JSON.stringify(currentFileInfo));
+  }
+  
+  // Send buffered chunks to new client (only if currently streaming)
+  if (isStreaming && bufferChunks.length > 0) {
+    console.log(`Sending ${bufferChunks.length} buffered chunks to new client`);
+    bufferChunks.forEach(chunk => {
+      if (ws.readyState === 1) { // WebSocket.OPEN
+        try {
+          ws.send(chunk);
+        } catch (error) {
+          console.error('Error sending buffered chunk to new client:', error.message);
+        }
+      }
+    });
+  }
   
   // Handle client disconnection
   ws.on('close', () => {
