@@ -3,349 +3,91 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>WebSocket Video Stream Player & Logger</title>
+    <title>Simple WebSocket Video Player</title>
     <style>
-        * {
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-        }
-
         body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            min-height: 100vh;
-            display: flex;
-            flex-direction: column;
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background: #f0f0f0;
         }
-
-        .header {
-            text-align: center;
-            padding: 20px;
-            background: rgba(0, 0, 0, 0.2);
-            backdrop-filter: blur(10px);
-        }
-
-        .main-container {
-            display: grid;
-            grid-template-columns: 1fr 400px;
-            gap: 20px;
-            padding: 20px;
-            flex: 1;
-            max-width: 1400px;
+        
+        .container {
+            max-width: 800px;
             margin: 0 auto;
-            width: 100%;
-        }
-
-        .video-section {
-            background: rgba(255, 255, 255, 0.1);
-            border-radius: 15px;
+            background: white;
             padding: 20px;
-            backdrop-filter: blur(10px);
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
         }
-
-        .logs-section {
-            background: rgba(0, 0, 0, 0.4);
-            border-radius: 15px;
-            padding: 20px;
-            backdrop-filter: blur(10px);
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
-            display: flex;
-            flex-direction: column;
-        }
-
+        
         #videoPlayer {
             width: 100%;
-            max-width: 800px;
-            border-radius: 10px;
+            max-width: 600px;
             background: #000;
-            margin-bottom: 15px;
+            border-radius: 5px;
         }
-
-        .video-controls {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            margin-bottom: 15px;
+        
+        .controls {
+            margin: 15px 0;
         }
-
-        .control-btn {
-            background: linear-gradient(45deg, #ff6b6b, #4ecdc4);
+        
+        button {
+            background: #007bff;
             color: white;
             border: none;
-            padding: 10px 20px;
-            border-radius: 25px;
+            padding: 10px 15px;
+            margin: 5px;
+            border-radius: 5px;
             cursor: pointer;
-            font-size: 14px;
-            transition: transform 0.2s;
         }
-
-        .control-btn:hover {
-            transform: scale(1.05);
+        
+        button:hover {
+            background: #0056b3;
         }
-
-        .control-btn:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
-            transform: none;
-        }
-
-        .status-grid {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 10px;
-            margin-bottom: 15px;
-        }
-
-        .stat-box {
-            background: rgba(255, 255, 255, 0.1);
-            padding: 15px;
-            border-radius: 10px;
-            text-align: center;
-        }
-
-        .stat-value {
-            font-size: 1.5em;
-            font-weight: bold;
-            color: #4ecdc4;
-        }
-
-        .logs-container {
-            flex: 1;
-            display: flex;
-            flex-direction: column;
-        }
-
-        .logs-header {
-            display: flex;
-            justify-content: between;
-            align-items: center;
-            margin-bottom: 10px;
-        }
-
-        .log-filters {
-            display: flex;
-            gap: 5px;
-            margin-bottom: 10px;
-        }
-
-        .filter-btn {
-            background: rgba(255, 255, 255, 0.1);
-            color: white;
-            border: 1px solid rgba(255, 255, 255, 0.3);
-            padding: 5px 10px;
-            border-radius: 15px;
-            cursor: pointer;
-            font-size: 12px;
-            transition: all 0.2s;
-        }
-
-        .filter-btn.active {
-            background: #4ecdc4;
-            border-color: #4ecdc4;
-        }
-
-        .logs-display {
-            background: rgba(0, 0, 0, 0.6);
-            border-radius: 10px;
-            padding: 15px;
-            height: 400px;
-            overflow-y: auto;
-            font-family: 'Courier New', monospace;
-            font-size: 12px;
-            line-height: 1.4;
-            flex: 1;
-        }
-
-        .log-entry {
-            margin-bottom: 8px;
-            padding: 5px;
-            border-radius: 3px;
-            word-wrap: break-word;
-        }
-
-        .log-info {
-            color: #87ceeb;
-            border-left: 3px solid #87ceeb;
-            padding-left: 8px;
-        }
-
-        .log-success {
-            color: #90ee90;
-            border-left: 3px solid #90ee90;
-            padding-left: 8px;
-        }
-
-        .log-warning {
-            color: #ffd700;
-            border-left: 3px solid #ffd700;
-            padding-left: 8px;
-        }
-
-        .log-error {
-            color: #ff6b6b;
-            border-left: 3px solid #ff6b6b;
-            padding-left: 8px;
-        }
-
-        .log-websocket {
-            color: #dda0dd;
-            border-left: 3px solid #dda0dd;
-            padding-left: 8px;
-        }
-
-        .log-video {
-            color: #98fb98;
-            border-left: 3px solid #98fb98;
-            padding-left: 8px;
-        }
-
-        .connection-status {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            margin-bottom: 15px;
+        
+        .status {
+            margin: 10px 0;
             padding: 10px;
-            background: rgba(255, 255, 255, 0.1);
-            border-radius: 10px;
+            background: #f8f9fa;
+            border-radius: 5px;
+            font-family: monospace;
+            font-size: 14px;
         }
-
-        .status-indicator {
-            width: 12px;
-            height: 12px;
-            border-radius: 50%;
-            background: #ff6b6b;
-            animation: pulse 2s infinite;
-        }
-
-        .status-indicator.connected {
-            background: #4ecdc4;
-        }
-
-        @keyframes pulse {
-            0% { transform: scale(1); opacity: 1; }
-            50% { transform: scale(1.1); opacity: 0.7; }
-            100% { transform: scale(1); opacity: 1; }
-        }
-
-        .file-info {
-            background: rgba(255, 255, 255, 0.1);
-            padding: 15px;
-            border-radius: 10px;
-            margin-bottom: 15px;
-            display: none;
-        }
-
-        @media (max-width: 1200px) {
-            .main-container {
-                grid-template-columns: 1fr;
-                grid-template-rows: auto auto;
-            }
-            
-            .logs-section {
-                order: 2;
-            }
+        
+        .logs {
+            height: 200px;
+            overflow-y: auto;
+            background: #f8f9fa;
+            border: 1px solid #ddd;
+            padding: 10px;
+            font-family: monospace;
+            font-size: 12px;
         }
     </style>
 </head>
 <body>
-    <div class="header">
-        <h1>🎬 WebSocket Video Stream Player & Logger</h1>
-        <p>Real-time video streaming with comprehensive logging and debugging</p>
-    </div>
-
-    <div class="main-container">
-        <!-- Video Section -->
-        <div class="video-section">
-            <h2>📺 Video Player</h2>
-            
-            <div class="connection-status">
-                <div class="status-indicator" id="statusIndicator"></div>
-                <span id="connectionStatus">Connecting to WebSocket server...</span>
-            </div>
-
-            <div class="file-info" id="fileInfo">
-                <!-- File information will be displayed here -->
-            </div>
-
-            <video id="videoPlayer" controls preload="none">
-                Your browser does not support the video tag.
-            </video>
-
-            <div class="video-controls">
-                <button class="control-btn" id="playBtn">▶️ Play</button>
-                <button class="control-btn" id="pauseBtn">⏸️ Pause</button>
-                <button class="control-btn" id="enablePlayerBtn">🎬 Enable Player</button>
-                <span id="timeDisplay" style="margin-left: auto; font-family: monospace;">0:00 / 0:00</span>
-            </div>
-
-            <div class="status-grid">
-                <div class="stat-box">
-                    <div class="stat-value" id="totalBytes">0 B</div>
-                    <div>Bytes Received</div>
-                </div>
-                <div class="stat-box">
-                    <div class="stat-value" id="chunkCount">0</div>
-                    <div>Chunks Received</div>
-                </div>
-                <div class="stat-box">
-                    <div class="stat-value" id="bufferLevel">0s</div>
-                    <div>Buffered Duration</div>
-                </div>
-                <div class="stat-box">
-                    <div class="stat-value" id="playbackState">Ready</div>
-                    <div>Playback State</div>
-                </div>
-            </div>
+    <div class="container">
+        <h1>Simple WebSocket Video Player</h1>
+        
+        <video id="videoPlayer" controls autoplay muted></video>
+        
+        <div class="controls">
+            <button onclick="playVideo()">Play</button>
+            <button onclick="pauseVideo()">Pause</button>
         </div>
-
-        <!-- Logs Section -->
-        <div class="logs-section">
-            <div class="logs-container">
-                <div class="logs-header">
-                    <h2>📋 System Logs</h2>
-                    <button class="control-btn" onclick="clearLogs()" style="padding: 5px 10px; font-size: 12px;">Clear</button>
-                </div>
-
-                <div class="log-filters">
-                    <button class="filter-btn active" data-filter="all">All</button>
-                    <button class="filter-btn" data-filter="info">Info</button>
-                    <button class="filter-btn" data-filter="success">Success</button>
-                    <button class="filter-btn" data-filter="warning">Warning</button>
-                    <button class="filter-btn" data-filter="error">Error</button>
-                    <button class="filter-btn" data-filter="websocket">WebSocket</button>
-                    <button class="filter-btn" data-filter="video">Video</button>
-                </div>
-
-                <div class="logs-display" id="logsDisplay">
-                    <!-- Logs will be displayed here -->
-                </div>
-            </div>
+        
+        <div class="status">
+            <div>Connection: <span id="connectionStatus">Connecting...</span></div>
+            <div>Chunks Received: <span id="chunkCount">0</span></div>
+            <div>Total Bytes: <span id="totalBytes">0 B</span></div>
+            <div>Buffered: <span id="buffered">0s</span></div>
         </div>
+        
+        <div class="logs" id="logs"></div>
     </div>
 
     <script>
-        // ===== STEP 1: INITIALIZE ELEMENTS AND VARIABLES =====
-        console.log('🚀 Step 1: Initializing unified video player and logger...');
-        
-        // DOM Elements
-        const videoPlayer = document.getElementById('videoPlayer');
-        const playBtn = document.getElementById('playBtn');
-        const pauseBtn = document.getElementById('pauseBtn');
-        const enablePlayerBtn = document.getElementById('enablePlayerBtn');
-        const statusIndicator = document.getElementById('statusIndicator');
-        const connectionStatus = document.getElementById('connectionStatus');
-        const fileInfo = document.getElementById('fileInfo');
-        const timeDisplay = document.getElementById('timeDisplay');
-        const totalBytesEl = document.getElementById('totalBytes');
-        const chunkCountEl = document.getElementById('chunkCount');
-        const bufferLevelEl = document.getElementById('bufferLevel');
-        const playbackStateEl = document.getElementById('playbackState');
-        const logsDisplay = document.getElementById('logsDisplay');
-
-        // Application State
+        // Simple state variables
         let ws = null;
         let mediaSource = null;
         let sourceBuffer = null;
@@ -353,500 +95,81 @@
         let isAppending = false;
         let totalBytes = 0;
         let chunkCount = 0;
-        let currentFile = null;
-        let mimeType = '';
-        let isPlayerEnabled = true; // Enable player by default
-        let currentLogFilter = 'all';
 
-        // ===== STEP 2: LOGGING SYSTEM =====
-        console.log('📋 Step 2: Setting up comprehensive logging system...');
-        
-        function addLog(message, type = 'info', data = null) {
+        // DOM elements
+        const videoPlayer = document.getElementById('videoPlayer');
+        const connectionStatus = document.getElementById('connectionStatus');
+        const chunkCountEl = document.getElementById('chunkCount');
+        const totalBytesEl = document.getElementById('totalBytes');
+        const bufferedEl = document.getElementById('buffered');
+        const logs = document.getElementById('logs');
+
+        // Simple logging
+        function log(message) {
             const timestamp = new Date().toLocaleTimeString();
-            const logEntry = document.createElement('div');
-            logEntry.className = `log-entry log-${type}`;
-            
-            let logText = `[${timestamp}] ${message}`;
-            if (data) {
-                logText += ` | Data: ${JSON.stringify(data, null, 2)}`;
-            }
-            
-            logEntry.textContent = logText;
-            logEntry.setAttribute('data-type', type);
-            
-            logsDisplay.appendChild(logEntry);
-            logsDisplay.scrollTop = logsDisplay.scrollHeight;
-            
-            // Also log to browser console for debugging
-            console.log(`[${type.toUpperCase()}] ${message}`, data || '');
-            
-            // Limit log entries to prevent memory issues
-            while (logsDisplay.children.length > 500) {
-                logsDisplay.removeChild(logsDisplay.firstChild);
-            }
-            
-            applyLogFilter();
+            logs.innerHTML += `[${timestamp}] ${message}<br>`;
+            logs.scrollTop = logs.scrollHeight;
+            console.log(message);
         }
 
-        function clearLogs() {
-            logsDisplay.innerHTML = '';
-            addLog('Logs cleared', 'info');
-        }
-
-        function applyLogFilter() {
-            const entries = logsDisplay.querySelectorAll('.log-entry');
-            entries.forEach(entry => {
-                const type = entry.getAttribute('data-type');
-                if (currentLogFilter === 'all' || type === currentLogFilter) {
-                    entry.style.display = 'block';
-                } else {
-                    entry.style.display = 'none';
-                }
-            });
-        }
-
-        // Log filter buttons
-        document.querySelectorAll('.filter-btn').forEach(btn => {
-            btn.addEventListener('click', () => {
-                document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
-                btn.classList.add('active');
-                currentLogFilter = btn.getAttribute('data-filter');
-                applyLogFilter();
-                addLog(`Log filter changed to: ${currentLogFilter}`, 'info');
-            });
-        });
-
-        // ===== STEP 3: WEBSOCKET CONNECTION =====
-        console.log('🔌 Step 3: Establishing WebSocket connection...');
-        
-        function connectWebSocket() {
-            addLog('Attempting WebSocket connection to ws://localhost:3001', 'websocket');
+        // Initialize MediaSource immediately
+        function initMediaSource() {
+            log('Initializing MediaSource...');
             
-            try {
-                ws = new WebSocket('ws://localhost:3001');
-                ws.binaryType = 'arraybuffer'; // Important: Set binary type for video chunks
-                
-                ws.onopen = () => {
-                    addLog('WebSocket connection established successfully', 'success');
-                    statusIndicator.classList.add('connected');
-                    connectionStatus.textContent = 'Connected - Waiting for video stream...';
-                };
-
-                ws.onmessage = (event) => {
-                    handleWebSocketMessage(event);
-                };
-
-                ws.onerror = (error) => {
-                    addLog('WebSocket connection error', 'error', { error: error.message || 'Unknown error' });
-                    statusIndicator.classList.remove('connected');
-                    connectionStatus.textContent = 'Connection Failed - Server may not be running';
-                };
-
-                ws.onclose = (event) => {
-                    addLog('WebSocket connection closed', 'warning', { code: event.code, reason: event.reason });
-                    statusIndicator.classList.remove('connected');
-                    connectionStatus.textContent = 'Disconnected - Reconnecting...';
-                    
-                    // Auto-reconnect after 3 seconds
-                    setTimeout(connectWebSocket, 3000);
-                };
-                
-            } catch (error) {
-                addLog('Failed to create WebSocket connection', 'error', { error: error.message });
-            }
-        }
-
-        // ===== STEP 4: WEBSOCKET MESSAGE HANDLING =====
-        console.log('📨 Step 4: Setting up WebSocket message handlers...');
-        
-        function handleWebSocketMessage(event) {
-            // Handle binary data (video chunks)
-            if (event.data instanceof ArrayBuffer) {
-                handleVideoChunk(event.data);
+            if (!MediaSource.isTypeSupported('video/mp4; codecs="avc1.42E01E"')) {
+                log('ERROR: MP4 H.264 not supported');
                 return;
             }
 
-            // Handle JSON messages
-            try {
-                const message = JSON.parse(event.data);
-                addLog(`Received JSON message: ${message.type}`, 'websocket', message);
-                
-                switch(message.type) {
-                    case 'connected':
-                        connectionStatus.textContent = message.message;
-                        break;
-                        
-                    case 'fileInfo':
-                        handleFileInfo(message);
-                        break;
-                        
-                    case 'streamEnd':
-                        handleStreamEnd(message);
-                        break;
-                        
-                    case 'streamError':
-                    case 'error':
-                        handleStreamError(message);
-                        break;
-                        
-                    default:
-                        addLog(`Unknown message type: ${message.type}`, 'warning', message);
-                }
-            } catch (error) {
-                addLog('Failed to parse WebSocket message', 'error', { error: error.message });
-            }
-        }
-
-        function handleVideoChunk(arrayBuffer) {
-            const chunkSize = arrayBuffer.byteLength;
-            totalBytes += chunkSize;
-            chunkCount++;
-            
-            // Update statistics
-            totalBytesEl.textContent = formatBytes(totalBytes);
-            chunkCountEl.textContent = chunkCount.toLocaleString();
-            
-            addLog(`Received video chunk: ${formatBytes(chunkSize)} (Total: ${formatBytes(totalBytes)})`, 'video');
-            
-            // Add chunk to video buffer
-            addVideoChunk(new Uint8Array(arrayBuffer));
-        }
-
-        function handleFileInfo(message) {
-            currentFile = message;
-            const transcodingStatus = message.transcoding ? '🔄 Transcoding to H.264' : '✅ Browser Compatible';
-            
-            fileInfo.innerHTML = `
-                <strong>File:</strong> ${message.name}<br>
-                <strong>Size:</strong> ${formatBytes(message.size)}<br>
-                <strong>Video Files:</strong> ${message.totalFiles}<br>
-                <strong>Status:</strong> ${transcodingStatus}
-            `;
-            fileInfo.style.display = 'block';
-            
-            addLog(`File info received: ${message.name}`, 'success', message);
-            
-            // Initialize MediaSource when we receive file info
-            if (!mediaSource) {
-                addLog('Initializing MediaSource for incoming stream', 'info');
-                initializeMediaSource();
-            }
-        }
-
-        function handleStreamEnd(message) {
-            addLog('Video stream ended', 'success', message);
-            connectionStatus.textContent = 'Stream Complete';
-            playbackStateEl.textContent = 'Ended';
-            
-            if (mediaSource && mediaSource.readyState === 'open') {
-                try {
-                    if (!sourceBuffer.updating) {
-                        mediaSource.endOfStream();
-                        addLog('MediaSource stream ended gracefully', 'success');
-                    }
-                } catch (error) {
-                    addLog('Error ending MediaSource stream', 'error', { error: error.message });
-                }
-            }
-        }
-
-        function handleStreamError(message) {
-            addLog(`Stream error: ${message.message}`, 'error', message);
-            connectionStatus.textContent = 'Stream Error';
-            playbackStateEl.textContent = 'Error';
-        }
-
-        // ===== STEP 5: VIDEO PLAYER SETUP =====
-        console.log('🎬 Step 5: Setting up MediaSource video player...');
-        
-        function enableVideoPlayer() {
-            if (isPlayerEnabled) {
-                addLog('Video player already enabled', 'warning');
-                return;
-            }
-            
-            addLog('Enabling video player with MediaSource API', 'video');
-            isPlayerEnabled = true;
-            enablePlayerBtn.textContent = '✅ Player Enabled';
-            enablePlayerBtn.disabled = true;
-            
-            // Initialize MediaSource
-            initializeMediaSource();
-        }
-
-        function initializeMediaSource() {
-            addLog('Initializing MediaSource for video streaming', 'video');
-            
-            // Determine best MIME type for browser compatibility
-            const possibleMimeTypes = [
-                'video/mp4; codecs="avc1.42E01E, mp4a.40.2"',  // H.264 Baseline + AAC
-                'video/mp4; codecs="avc1.4D401E, mp4a.40.2"',  // H.264 Main + AAC
-                'video/mp4; codecs="avc1.64001E, mp4a.40.2"',  // H.264 High + AAC
-                'video/mp4; codecs="avc1.42E01E"',              // H.264 only
-                'video/mp4',                                     // Generic MP4
-                'video/webm; codecs="vp9, opus"',               // VP9 fallback
-                'video/webm'                                     // Generic WebM
-            ];
-            
-            mimeType = possibleMimeTypes.find(type => MediaSource.isTypeSupported(type));
-            
-            if (!mimeType) {
-                addLog('No supported video formats found in browser', 'error');
-                playbackStateEl.textContent = 'Unsupported';
-                return;
-            }
-            
-            addLog(`Using MIME type: ${mimeType}`, 'video');
-            
             mediaSource = new MediaSource();
             videoPlayer.src = URL.createObjectURL(mediaSource);
-            
-            mediaSource.addEventListener('sourceopen', onSourceOpen);
-            mediaSource.addEventListener('sourceended', () => {
-                addLog('MediaSource ended', 'video');
+
+            mediaSource.addEventListener('sourceopen', () => {
+                log('MediaSource opened');
+                try {
+                    sourceBuffer = mediaSource.addSourceBuffer('video/mp4; codecs="avc1.42E01E"');
+                    sourceBuffer.addEventListener('updateend', () => {
+                        isAppending = false;
+                        updateStats();
+                        processNextChunk();
+                    });
+                    log('SourceBuffer created successfully');
+                } catch (error) {
+                    log('ERROR creating SourceBuffer: ' + error.message);
+                }
             });
+
             mediaSource.addEventListener('error', (e) => {
-                addLog('MediaSource error occurred', 'error', { error: e });
+                log('MediaSource error: ' + e);
             });
         }
 
-        function onSourceOpen() {
-            addLog('MediaSource opened successfully', 'success');
-            
-            try {
-                // Only create sourceBuffer after sourceopen event
-                sourceBuffer = mediaSource.addSourceBuffer(mimeType);
-                sourceBuffer.addEventListener('updateend', onSourceBufferUpdate);
-                sourceBuffer.addEventListener('error', (e) => {
-                    addLog('SourceBuffer error', 'error', { error: e });
-                });
-                
-                // Set mode to 'sequence' for streaming
-                sourceBuffer.mode = 'sequence';
-                
-                playbackStateEl.textContent = 'Ready';
-                addLog('SourceBuffer created and ready for streaming', 'success');
-                
-                // Process any queued chunks
-                if (chunks.length > 0) {
-                    addLog(`Processing ${chunks.length} queued video chunks`, 'video');
-                    processQueuedChunks();
-                }
-                
-            } catch (error) {
-                addLog('Failed to create SourceBuffer', 'error', { error: error.message });
-                playbackStateEl.textContent = 'Error';
-            }
-        }
-
-        function onSourceBufferUpdate() {
-            isAppending = false;
-            updateBufferStats();
-            
-            addLog(`SourceBuffer updated - buffered ranges: ${videoPlayer.buffered.length}`, 'video');
-            
-            // Check if we now have enough data to start playing
-            if (videoPlayer.buffered.length > 0 && videoPlayer.paused && videoPlayer.readyState >= 2) {
-                const bufferedEnd = videoPlayer.buffered.end(0);
-                if (bufferedEnd > 0.5) { // Start playing with just 0.5 seconds of buffer
-                    addLog('Sufficient buffer available - attempting auto-play', 'info');
-                    setTimeout(() => {
-                        if (videoPlayer.paused) {
-                            videoPlayer.play().then(() => {
-                                addLog('Auto-play successful after buffer update', 'success');
-                                playbackStateEl.textContent = 'Playing';
-                            }).catch(error => {
-                                addLog('Auto-play failed after buffer update', 'warning', { error: error.message });
-                            });
-                        }
-                    }, 100);
-                }
-            }
-            
-            // Continue processing chunks
-            if (chunks.length > 0 && !sourceBuffer.updating) {
-                appendNextChunk();
-            }
-        }
-
-        function addVideoChunk(chunkData) {
-            chunks.push(chunkData);
-            addLog(`Video chunk queued (Queue size: ${chunks.length})`, 'video');
-            
-            if (sourceBuffer && !isAppending && mediaSource && mediaSource.readyState === 'open') {
-                appendNextChunk();
-            }
-        }
-
-        function processQueuedChunks() {
-            if (chunks.length > 0 && sourceBuffer && !sourceBuffer.updating) {
-                appendNextChunk();
-            }
-        }
-
-        function appendNextChunk() {
+        // Process video chunks
+        function processNextChunk() {
             if (chunks.length > 0 && sourceBuffer && !sourceBuffer.updating && !isAppending) {
                 isAppending = true;
                 const chunk = chunks.shift();
-                
                 try {
                     sourceBuffer.appendBuffer(chunk);
-                    addLog(`Appended video chunk to buffer (${formatBytes(chunk.length)})`, 'video');
                 } catch (error) {
+                    log('ERROR appending chunk: ' + error.message);
                     isAppending = false;
-                    addLog('Error appending video chunk to buffer', 'error', { error: error.message });
                 }
             }
         }
 
-        function updateBufferStats() {
+        // Update statistics
+        function updateStats() {
+            chunkCountEl.textContent = chunkCount;
+            totalBytesEl.textContent = formatBytes(totalBytes);
+            
             if (videoPlayer.buffered.length > 0) {
-                const bufferedEnd = videoPlayer.buffered.end(videoPlayer.buffered.length - 1);
-                bufferLevelEl.textContent = `${bufferedEnd.toFixed(1)}s`;
-                
-                // Update playback state based on buffer level and video state
-                if (videoPlayer.paused && bufferedEnd > 1) {
-                    playbackStateEl.textContent = 'Ready to Play';
-                } else if (videoPlayer.readyState >= 3) {
-                    playbackStateEl.textContent = 'Can Play';
-                } else if (videoPlayer.readyState >= 1) {
-                    playbackStateEl.textContent = 'Loading';
-                }
-            } else {
-                bufferLevelEl.textContent = '0s';
-                if (videoPlayer.readyState < 3) {
-                    playbackStateEl.textContent = 'Buffering';
-                }
+                const buffered = videoPlayer.buffered.end(videoPlayer.buffered.length - 1);
+                bufferedEl.textContent = buffered.toFixed(1) + 's';
             }
         }
 
-        // ===== STEP 6: VIDEO CONTROLS =====
-        console.log('🎮 Step 6: Setting up video controls and event handlers...');
-        
-        enablePlayerBtn.addEventListener('click', enableVideoPlayer);
-
-        playBtn.addEventListener('click', () => {
-            addLog('Play button clicked', 'video');
-            
-            // Check MediaSource and SourceBuffer status first
-            if (!mediaSource || !sourceBuffer) {
-                addLog('MediaSource not initialized yet - please wait for video stream', 'warning');
-                return;
-            }
-            
-            if (mediaSource.readyState !== 'open') {
-                addLog(`MediaSource not ready (state: ${mediaSource.readyState})`, 'warning');
-                return;
-            }
-            
-            // Log current video state for debugging
-            addLog(`Video readyState: ${videoPlayer.readyState}, buffered ranges: ${videoPlayer.buffered.length}`, 'info');
-            
-            // Check buffered data
-            if (videoPlayer.buffered.length === 0) {
-                addLog('No buffered ranges available - attempting to play', 'warning');
-            } else {
-                const bufferedEnd = videoPlayer.buffered.end(0);
-                addLog(`Buffered data available: ${bufferedEnd.toFixed(1)}s`, 'info');
-            }
-            
-            // Attempt to play regardless of readyState for streaming content
-            videoPlayer.play().then(() => {
-                addLog('Video playback started successfully', 'success');
-                playbackStateEl.textContent = 'Playing';
-            }).catch(error => {
-                addLog('Video playback failed', 'error', { error: error.message });
-                
-                // If autoplay failed, try with user interaction
-                if (error.name === 'NotAllowedError') {
-                    addLog('Autoplay blocked - manual play required', 'warning');
-                }
-            });
-        });
-
-        pauseBtn.addEventListener('click', () => {
-            videoPlayer.pause();
-            addLog('Video playback paused', 'video');
-            playbackStateEl.textContent = 'Paused';
-        });
-
-        // Video event listeners
-        videoPlayer.addEventListener('loadedmetadata', () => {
-            addLog('Video metadata loaded', 'success');
-            updateBufferStats();
-        });
-
-        videoPlayer.addEventListener('loadeddata', () => {
-            addLog('Video data loaded', 'success');
-            updateBufferStats();
-        });
-
-        videoPlayer.addEventListener('timeupdate', () => {
-            const current = formatTime(videoPlayer.currentTime);
-            const duration = formatTime(videoPlayer.duration || 0);
-            timeDisplay.textContent = `${current} / ${duration}`;
-            updateBufferStats();
-        });
-
-        // Add additional video event listeners for better debugging
-        videoPlayer.addEventListener('loadstart', () => {
-            addLog('Video load started', 'video');
-            playbackStateEl.textContent = 'Loading';
-        });
-
-        videoPlayer.addEventListener('progress', () => {
-            addLog('Video download in progress', 'video');
-        });
-
-        videoPlayer.addEventListener('suspend', () => {
-            addLog('Video loading suspended', 'video');
-        });
-
-        videoPlayer.addEventListener('abort', () => {
-            addLog('Video loading aborted', 'warning');
-        });
-
-        videoPlayer.addEventListener('emptied', () => {
-            addLog('Video emptied', 'warning');
-        });
-
-        videoPlayer.addEventListener('stalled', () => {
-            addLog('Video download stalled', 'warning');
-        });
-
-        videoPlayer.addEventListener('canplay', () => {
-            addLog('Video can play - sufficient data buffered', 'success');
-            playbackStateEl.textContent = 'Can Play';
-            
-            // Auto-play when video is ready (immediate attempt for streaming)
-            if (videoPlayer.paused) {
-                videoPlayer.play().then(() => {
-                    addLog('Auto-playing video', 'success');
-                    playbackStateEl.textContent = 'Playing';
-                }).catch(error => {
-                    addLog('Auto-play failed - user interaction may be required', 'warning', { error: error.message });
-                });
-            }
-        });
-
-        videoPlayer.addEventListener('playing', () => {
-            addLog('Video is now playing', 'success');
-            playbackStateEl.textContent = 'Playing';
-        });
-
-        videoPlayer.addEventListener('waiting', () => {
-            addLog('Video buffering - waiting for more data', 'warning');
-            playbackStateEl.textContent = 'Buffering';
-        });
-
-        videoPlayer.addEventListener('error', (e) => {
-            addLog('Video playback error', 'error', { error: e });
-            playbackStateEl.textContent = 'Error';
-        });
-
-        // ===== STEP 7: UTILITY FUNCTIONS =====
-        console.log('🔧 Step 7: Setting up utility functions...');
-        
+        // Format bytes
         function formatBytes(bytes) {
             if (bytes === 0) return '0 B';
             const k = 1024;
@@ -855,31 +178,96 @@
             return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
         }
 
-        function formatTime(seconds) {
-            if (isNaN(seconds)) return '0:00';
-            const mins = Math.floor(seconds / 60);
-            const secs = Math.floor(seconds % 60);
-            return `${mins}:${secs.toString().padStart(2, '0')}`;
+        // WebSocket connection
+        function connectWebSocket() {
+            log('Connecting to WebSocket...');
+            
+            ws = new WebSocket('ws://localhost:3001');
+            ws.binaryType = 'arraybuffer';
+
+            ws.onopen = () => {
+                log('WebSocket connected');
+                connectionStatus.textContent = 'Connected';
+            };
+
+            ws.onmessage = (event) => {
+                if (event.data instanceof ArrayBuffer) {
+                    // Handle video chunk
+                    const chunkSize = event.data.byteLength;
+                    totalBytes += chunkSize;
+                    chunkCount++;
+                    
+                    chunks.push(new Uint8Array(event.data));
+                    log(`Received chunk: ${formatBytes(chunkSize)}`);
+                    
+                    if (sourceBuffer && !isAppending) {
+                        processNextChunk();
+                    }
+                } else {
+                    // Handle JSON message
+                    try {
+                        const message = JSON.parse(event.data);
+                        log(`Message: ${message.type}`);
+                        
+                        if (message.type === 'fileInfo') {
+                            log(`File: ${message.name} (${formatBytes(message.size)})`);
+                        }
+                    } catch (error) {
+                        log('ERROR parsing message: ' + error.message);
+                    }
+                }
+            };
+
+            ws.onerror = (error) => {
+                log('WebSocket error');
+                connectionStatus.textContent = 'Error';
+            };
+
+            ws.onclose = () => {
+                log('WebSocket closed - reconnecting...');
+                connectionStatus.textContent = 'Reconnecting...';
+                setTimeout(connectWebSocket, 3000);
+            };
         }
 
-        // ===== STEP 8: INITIALIZE APPLICATION =====
-        console.log('🚀 Step 8: Starting application...');
-        addLog('Unified Video Player & Logger initialized successfully', 'success');
-        addLog('Ready to receive WebSocket video streams', 'info');
-        addLog('Player enabled by default for automatic playback', 'info');
-        
-        // Update button state since player is enabled by default
-        enablePlayerBtn.textContent = '✅ Player Enabled';
-        enablePlayerBtn.disabled = true;
-        
-        // Start WebSocket connection
+        // Video controls
+        function playVideo() {
+            videoPlayer.play().then(() => {
+                log('Video playing');
+            }).catch(error => {
+                log('Play failed: ' + error.message);
+            });
+        }
+
+        function pauseVideo() {
+            videoPlayer.pause();
+            log('Video paused');
+        }
+
+        // Video events
+        videoPlayer.addEventListener('canplay', () => {
+            log('Video can play');
+            if (videoPlayer.paused) {
+                playVideo();
+            }
+        });
+
+        videoPlayer.addEventListener('playing', () => {
+            log('Video started playing');
+        });
+
+        videoPlayer.addEventListener('waiting', () => {
+            log('Video buffering...');
+        });
+
+        videoPlayer.addEventListener('error', (e) => {
+            log('Video error: ' + e.message);
+        });
+
+        // Initialize everything
+        log('Starting video player...');
+        initMediaSource();
         connectWebSocket();
-        
-        // Initial state update
-        playbackStateEl.textContent = 'Ready';
-        totalBytesEl.textContent = '0 B';
-        chunkCountEl.textContent = '0';
-        bufferLevelEl.textContent = '0s';
     </script>
 </body>
 </html>
