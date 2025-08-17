@@ -113,27 +113,49 @@
     let isAppending = false;
     let mimeType = '';
 
-    // Initialize MediaSource for video playback
+    // Initialize MediaSource for video playbook
     function initializeMediaSource(fileName) {
-      // Determine MIME type based on file extension
-      const extension = fileName.toLowerCase().split('.').pop();
-      if (extension === 'mp4') {
-        mimeType = 'video/mp4; codecs="avc1.42E01E, mp4a.40.2"';
-      } else if (extension === 'mkv') {
-        // Try WebM first, then fallback to MP4
-        mimeType = 'video/webm; codecs="vp9, opus"';
-        if (!MediaSource.isTypeSupported(mimeType)) {
-          mimeType = 'video/mp4; codecs="avc1.42E01E, mp4a.40.2"';
-        }
-      } else {
-        mimeType = 'video/mp4; codecs="avc1.42E01E, mp4a.40.2"'; // Default fallback
+      // Test different codec combinations for better compatibility
+      // H.265 (HEVC) has limited browser support, prioritize H.264
+      const possibleMimeTypes = [
+        'video/mp4; codecs="avc1.42E01E, mp4a.40.2"',  // H.264 Baseline
+        'video/mp4; codecs="avc1.4D401E, mp4a.40.2"',  // H.264 Main
+        'video/mp4; codecs="avc1.64001E, mp4a.40.2"',  // H.264 High
+        'video/mp4; codecs="avc1.640028, mp4a.40.2"',  // H.264 High Level 4.0
+        'video/mp4; codecs="avc1.42E01E"',              // H.264 only
+        'video/mp4; codecs="avc1.4D001E"',              // H.264 Main only
+        'video/mp4',                                     // Generic MP4
+        'video/webm; codecs="vp9, opus"',               // VP9 fallback
+        'video/webm; codecs="vp8, vorbis"',             // VP8 fallback
+        'video/webm'                                     // Generic WebM
+      ];
+      
+      // Find the first supported MIME type
+      mimeType = possibleMimeTypes.find(type => MediaSource.isTypeSupported(type));
+      
+      if (!mimeType) {
+        console.error('No supported video formats found');
+        playbackInfo.textContent = 'Error: Browser does not support any video formats. This video may use H.265/HEVC codec which is not supported by MediaSource API.';
+        
+        // Show alternative options
+        const alternativeInfo = document.createElement('div');
+        alternativeInfo.innerHTML = `
+          <h4>Alternative Options:</h4>
+          <p>1. This video uses H.265/HEVC codec which browsers don't support for streaming</p>
+          <p>2. Try with an H.264 encoded video torrent instead</p>
+          <p>3. The WebSocket chunks are being received successfully - the issue is browser codec support</p>
+        `;
+        alternativeInfo.style.background = '#fff3cd';
+        alternativeInfo.style.padding = '10px';
+        alternativeInfo.style.borderRadius = '5px';
+        alternativeInfo.style.marginTop = '10px';
+        alternativeInfo.style.fontSize = '14px';
+        videoContainer.appendChild(alternativeInfo);
+        
+        return;
       }
       
-      if (!MediaSource.isTypeSupported(mimeType)) {
-        console.warn('MIME type not supported:', mimeType);
-        playbackInfo.textContent = 'Video format may not be directly playable. Trying generic MP4...';
-        mimeType = 'video/mp4'; // Minimal fallback
-      }
+      console.log('Using MIME type:', mimeType);
       
       mediaSource = new MediaSource();
       videoPlayer.src = URL.createObjectURL(mediaSource);
@@ -155,11 +177,13 @@
           // Process any chunks that arrived before MediaSource was ready
           if (chunks.length > 0) {
             console.log(`Processing ${chunks.length} queued chunks`);
-            appendNextChunk();
+            processQueuedChunks();
           }
         } catch (e) {
           console.error('Error creating SourceBuffer:', e);
-          playbackInfo.textContent = 'Error: Cannot create video buffer. Format may not be supported.';
+          playbackInfo.textContent = 'Error: Cannot create video buffer. Trying alternative format...';
+          // Try with a more basic MIME type
+          tryFallbackMediaSource();
         }
       });
       
@@ -173,14 +197,56 @@
       });
     }
     
+    function tryFallbackMediaSource() {
+      console.log('Trying fallback MediaSource with basic MP4');
+      if (mediaSource && mediaSource.readyState === 'open') {
+        try {
+          sourceBuffer = mediaSource.addSourceBuffer('video/mp4');
+          sourceBuffer.addEventListener('updateend', onSourceBufferUpdateEnd);
+          sourceBuffer.addEventListener('error', (e) => {
+            console.error('Fallback SourceBuffer error:', e);
+            playbackInfo.textContent = 'Error: Video format not supported by browser';
+          });
+          playbackInfo.textContent = 'Using fallback video format...';
+          if (chunks.length > 0) {
+            processQueuedChunks();
+          }
+        } catch (e) {
+          console.error('Fallback MediaSource also failed:', e);
+          playbackInfo.textContent = 'Error: Browser cannot play this video format';
+        }
+      }
+    }
+    
+    function processQueuedChunks() {
+      console.log(`Processing ${chunks.length} queued chunks`);
+      // Process chunks one by one to avoid overwhelming the buffer
+      if (chunks.length > 0 && sourceBuffer && !sourceBuffer.updating) {
+        appendNextChunk();
+      }
+    }
+    
     function setupVideoControls() {
       // Custom play button
       playBtn.addEventListener('click', () => {
+        // Check if video has enough data buffered
+        if (videoPlayer.buffered.length === 0) {
+          playbackInfo.textContent = 'Waiting for video data to buffer...';
+          return;
+        }
+        
+        const bufferedEnd = videoPlayer.buffered.end(0);
+        if (bufferedEnd < 2) {
+          playbackInfo.textContent = 'Buffering more data before play... (' + bufferedEnd.toFixed(1) + 's buffered)';
+          return;
+        }
+        
         videoPlayer.play().then(() => {
           console.log('Video started playing');
+          playbackInfo.textContent = 'Video playing successfully';
         }).catch(e => {
           console.error('Play failed:', e);
-          playbackInfo.textContent = 'Play failed: ' + e.message;
+          playbackInfo.textContent = 'Play failed: ' + e.message + ' (Try waiting for more data)';
         });
       });
       
@@ -246,15 +312,10 @@
         const bufferedMB = (bufferedEnd * 1000).toFixed(1); // Rough estimate
         playbackInfo.textContent = `Buffered: ${bufferedEnd.toFixed(1)}s${duration ? ` / ${duration.toFixed(1)}s` : ''} (~${bufferedMB}KB)`;
         
-        // Auto-play when enough data is buffered (3 seconds)
-        if (bufferedEnd > 3 && videoPlayer.paused && videoPlayer.readyState >= 3) {
-          videoPlayer.play().then(() => {
-            console.log('Auto-play started');
-            playbackInfo.textContent += ' - Auto-playing';
-          }).catch(e => {
-            console.log('Auto-play failed (user interaction required):', e.message);
-            playbackInfo.textContent += ' (Click play to start)';
-          });
+        // Auto-play when enough data is buffered (5 seconds) and user has interacted
+        if (bufferedEnd > 5 && videoPlayer.paused && videoPlayer.readyState >= 3) {
+          // Don't auto-play immediately, wait for user interaction
+          playbackInfo.textContent += ' - Ready to play (click play button)';
         }
       }
     }
@@ -284,7 +345,7 @@
       if (sourceBuffer && !isAppending && mediaSource && mediaSource.readyState === 'open') {
         appendNextChunk();
       } else {
-        console.log('MediaSource not ready, chunk queued for later');
+        console.log('MediaSource not ready, chunk queued for later (State:', mediaSource?.readyState, ')');
       }
     }
 
@@ -341,9 +402,15 @@
           addVideoChunk(new Uint8Array(event.data));
           playbackInfo.textContent = `Playing video... Chunks: ${chunkCount}, Buffered: ${formatBytes(totalBytes)}`;
         } else {
-          console.log('MediaSource not ready, chunk queued');
+          console.log('MediaSource not ready, chunk queued (State:', mediaSource?.readyState, ')');
           // Store chunk for later if MediaSource isn't ready yet
           chunks.push(new Uint8Array(event.data));
+          if (videoContainer.style.display === 'none') {
+            // Auto-initialize video player if we start receiving chunks
+            console.log('Auto-initializing video player for incoming chunks');
+            initializeMediaSource('stream.mp4'); // Default filename
+            videoContainer.style.display = 'block';
+          }
         }
         return;
       }

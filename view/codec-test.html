@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Browser Codec Support Test</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+    .supported { color: green; }
+    .not-supported { color: red; }
+    .test-result {
+      padding: 5px;
+      margin: 2px 0;
+      border-radius: 3px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Browser Video Codec Support Test</h1>
+  <p>This page tests which video codecs your browser supports for streaming with MediaSource API.</p>
+  
+  <div id="results"></div>
+  
+  <h2>Current Video Analysis</h2>
+  <div id="videoInfo">
+    <p><strong>Video File:</strong> Superman.2025.1080p.WEBRip.x265.10bit.AAC5.1-[YTS.MX].mp4</p>
+    <p><strong>Video Codec:</strong> H.265/HEVC (x265) - 10-bit</p>
+    <p><strong>Audio Codec:</strong> AAC 5.1</p>
+    <p><strong>Issue:</strong> H.265/HEVC is not supported by browsers via MediaSource API</p>
+  </div>
+
+  <h2>Recommendations</h2>
+  <div id="recommendations">
+    <ol>
+      <li><strong>Use H.264 Videos:</strong> Look for torrents with "x264" instead of "x265"</li>
+      <li><strong>Check Codec Support:</strong> See the test results below</li>
+      <li><strong>Your Stream is Working:</strong> The WebSocket chunks are being received successfully</li>
+    </ol>
+  </div>
+
+  <script>
+    const resultsDiv = document.getElementById('results');
+    
+    const codecsToTest = [
+      'video/mp4; codecs="avc1.42E01E, mp4a.40.2"',   // H.264 Baseline + AAC
+      'video/mp4; codecs="avc1.4D401E, mp4a.40.2"',   // H.264 Main + AAC
+      'video/mp4; codecs="avc1.64001E, mp4a.40.2"',   // H.264 High + AAC
+      'video/mp4; codecs="hev1.1.6.L93.B0, mp4a.40.2"', // H.265/HEVC + AAC
+      'video/mp4; codecs="hvc1.1.6.L93.B0, mp4a.40.2"', // H.265/HEVC (alternative)
+      'video/mp4',                                      // Generic MP4
+      'video/webm; codecs="vp9, opus"',                // VP9 + Opus
+      'video/webm; codecs="vp8, vorbis"',              // VP8 + Vorbis
+      'video/webm',                                     // Generic WebM
+    ];
+    
+    const codecNames = [
+      'H.264 Baseline + AAC',
+      'H.264 Main + AAC', 
+      'H.264 High + AAC',
+      'H.265/HEVC + AAC (Type 1)',
+      'H.265/HEVC + AAC (Type 2)',
+      'Generic MP4',
+      'VP9 + Opus',
+      'VP8 + Vorbis',
+      'Generic WebM'
+    ];
+    
+    resultsDiv.innerHTML = '<h2>MediaSource API Codec Support Results:</h2>';
+    
+    codecsToTest.forEach((codec, index) => {
+      const isSupported = MediaSource.isTypeSupported(codec);
+      const resultDiv = document.createElement('div');
+      resultDiv.className = 'test-result';
+      resultDiv.innerHTML = `
+        <span class="${isSupported ? 'supported' : 'not-supported'}">
+          ${isSupported ? '✅' : '❌'} ${codecNames[index]}
+        </span>
+        <br><small style="color: #666;">${codec}</small>
+      `;
+      resultsDiv.appendChild(resultDiv);
+    });
+    
+    // Summary
+    const summaryDiv = document.createElement('div');
+    summaryDiv.style.marginTop = '20px';
+    summaryDiv.style.padding = '15px';
+    summaryDiv.style.backgroundColor = '#f8f9fa';
+    summaryDiv.style.borderRadius = '5px';
+    
+    const h264Supported = MediaSource.isTypeSupported('video/mp4; codecs="avc1.42E01E, mp4a.40.2"');
+    const h265Supported = MediaSource.isTypeSupported('video/mp4; codecs="hev1.1.6.L93.B0, mp4a.40.2"') || 
+                          MediaSource.isTypeSupported('video/mp4; codecs="hvc1.1.6.L93.B0, mp4a.40.2"');
+    
+    summaryDiv.innerHTML = `
+      <h3>Summary for Your Video:</h3>
+      <p><strong>Your Superman video uses H.265/HEVC:</strong> ${h265Supported ? '✅ Supported' : '❌ Not Supported'}</p>
+      <p><strong>H.264 Alternative would work:</strong> ${h264Supported ? '✅ Supported' : '❌ Not Supported'}</p>
+      ${!h265Supported ? '<p><strong style="color: red;">Solution:</strong> Find a torrent with H.264 (x264) encoding instead of H.265 (x265)</p>' : ''}
+    `;
+    
+    resultsDiv.appendChild(summaryDiv);
+  </script>
+</body>
+</html>

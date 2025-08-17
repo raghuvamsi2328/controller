@@ -4,7 +4,15 @@ import { WebSocketServer } from 'ws';
 
 // Replace with your own magnet URI or torrent hash
 // Using Ubuntu 22.04 Desktop ISO as a test torrent (always has seeders)
-const torrentId = 'magnet:?xt=urn:btih:7969590D4697BDF90F680729D15560C9F95B160E';
+// Hard-coded magnet link for testing (replace with the torrent you want to stream)
+// Current torrent: Superman (2025) - H.265 codec (not browser compatible)
+// For testing, try a smaller H.264 video torrent
+const magnetLink = 'magnet:?xt=urn:btih:7969590D4697BDF90F680729D15560C9F95B160E';
+
+console.log('🎬 IMPORTANT: Current video uses H.265/HEVC (x265) codec');
+console.log('🎬 Browsers do not support H.265 via MediaSource API');
+console.log('🎬 For video playback to work, use an H.264 (x264) torrent instead');
+console.log('🎬 Search for torrents with "x264" instead of "x265"');
 
 const client = new WebTorrent();
 const wss = new WebSocketServer({ port: 3001 });
