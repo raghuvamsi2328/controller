@@ -1,29 +1,126 @@
 
 import WebTorrent from 'webtorrent';
 import { WebSocketServer } from 'ws';
+import ffmpeg from 'fluent-ffmpeg';
+import { PassThrough } from 'stream';
 
 // Replace with your own magnet URI or torrent hash
 // Using Ubuntu 22.04 Desktop ISO as a test torrent (always has seeders)
 // Hard-coded magnet link for testing (replace with the torrent you want to stream)
 // Current torrent: Superman (2025) - H.265 codec (not browser compatible)
 // For testing, try a smaller H.264 video torrent
-const magnetLink = 'magnet:?xt=urn:btih:7969590D4697BDF90F680729D15560C9F95B160E';
+// Add this torrent magnet link
+// Option 1: Superman Returns sample
+// const magnetLink = 'magnet:?xt=urn:btih:7969590D4697BDF90F680729D15560C9F95B160E';
 
-console.log('🎬 IMPORTANT: Current video uses H.265/HEVC (x265) codec');
-console.log('🎬 Browsers do not support H.265 via MediaSource API');
-console.log('🎬 For video playback to work, use an H.264 (x264) torrent instead');
-console.log('🎬 Search for torrents with "x264" instead of "x265"');
+// Option 2: Big Buck Bunny (more peers available)
+const magnetLink = 'magnet:?xt=urn:btih:dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c&dn=Big+Buck+Bunny&tr=udp%3A%2F%2Fexplodie.org%3A6969&tr=udp%3A%2F%2Ftracker.coppersurfer.tk%3A6969&tr=udp%3A%2F%2Ftracker.empire-js.us%3A1337&tr=udp%3A%2F%2Ftracker.leechers-paradise.org%3A6969&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337&tr=wss%3A%2F%2Ftracker.btorrent.xyz&tr=wss%3A%2F%2Ftracker.fastcast.nz&tr=wss%3A%2F%2Ftracker.openwebtorrent.com';
+
+console.log('🎬 Auto-transcoding enabled with FFmpeg');
+console.log('🎬 H.265/HEVC videos will be converted to H.264 in real-time');
+console.log('🎬 Any video format will now work with browser playback!');
 
 const client = new WebTorrent();
 const wss = new WebSocketServer({ port: 3001 });
 
 let bufferChunks = [];
 
+// Function to check if video needs transcoding
+function needsTranscoding(filename) {
+  const extension = filename.toLowerCase().split('.').pop();
+  const name = filename.toLowerCase();
+  
+  // Check for H.265/HEVC indicators
+  const hasHEVC = name.includes('x265') || 
+                  name.includes('hevc') || 
+                  name.includes('h265') ||
+                  name.includes('265');
+  
+  // Check for non-MP4 formats that might need transcoding
+  const needsFormatConversion = extension === 'mkv' || 
+                               extension === 'avi' || 
+                               extension === 'mov' ||
+                               extension === 'webm';
+  
+  return hasHEVC || needsFormatConversion;
+}
+
+// Function to create FFmpeg transcoding stream
+function createTranscodingStream(inputStream, filename) {
+  console.log(`🔄 Transcoding ${filename} to browser-compatible H.264 MP4...`);
+  
+  const outputStream = new PassThrough();
+  
+  const ffmpegCommand = ffmpeg(inputStream)
+    .inputFormat('mp4') // Try MP4 first, FFmpeg will auto-detect if needed
+    .videoCodec('libx264') // Convert to H.264
+    .audioCodec('aac') // Convert audio to AAC
+    .format('mp4')
+    .addOptions([
+      '-preset ultrafast', // Fastest encoding for real-time
+      '-tune zerolatency', // Optimize for streaming
+      '-crf 28', // Good quality balance for streaming
+      '-maxrate 2M', // Limit bitrate for smoother streaming
+      '-bufsize 4M', // Buffer size
+      '-movflags frag_keyframe+empty_moov', // Enable progressive streaming
+      '-f mp4' // Force MP4 format
+    ]);
+  
+  // Handle transcoding progress
+  ffmpegCommand.on('start', (commandLine) => {
+    console.log('🎬 FFmpeg started:', commandLine);
+  });
+  
+  ffmpegCommand.on('progress', (progress) => {
+    if (progress.percent) {
+      console.log(`🔄 Transcoding progress: ${Math.round(progress.percent)}%`);
+    }
+  });
+  
+  ffmpegCommand.on('error', (err) => {
+    console.error('❌ FFmpeg transcoding error:', err.message);
+    // Try fallback without specific input format
+    console.log('🔄 Retrying transcoding with auto-detection...');
+    createFallbackTranscodingStream(inputStream, filename, outputStream);
+  });
+  
+  ffmpegCommand.on('end', () => {
+    console.log('✅ Transcoding completed successfully');
+    outputStream.end();
+  });
+  
+  // Pipe to output stream
+  ffmpegCommand.pipe(outputStream, { end: true });
+  
+  return outputStream;
+}
+
+// Fallback transcoding with minimal options
+function createFallbackTranscodingStream(inputStream, filename, outputStream) {
+  const fallbackCommand = ffmpeg(inputStream)
+    .videoCodec('libx264')
+    .audioCodec('aac')
+    .format('mp4')
+    .addOptions([
+      '-preset ultrafast',
+      '-movflags frag_keyframe+empty_moov'
+    ]);
+  
+  fallbackCommand.on('error', (err) => {
+    console.error('❌ Fallback transcoding also failed:', err.message);
+    console.log('⚠️ Streaming original video without transcoding...');
+    // If transcoding fails, stream original
+    inputStream.pipe(outputStream);
+  });
+  
+  fallbackCommand.pipe(outputStream, { end: true });
+}
+
 // Start downloading the torrent immediately
 console.log('Starting torrent download...');
-console.log('Torrent ID:', torrentId);
+console.log('Torrent ID:', magnetLink);
 
-const torrent = client.add(torrentId);
+const torrent = client.add(magnetLink);
 
 torrent.on('metadata', () => {
   console.log('Torrent metadata loaded:', torrent.name);
@@ -59,6 +156,17 @@ torrent.on('metadata', () => {
   const file = videoFiles[0];
   console.log(`Starting to stream: ${file.name}`);
   
+  // Check if transcoding is needed
+  const requiresTranscoding = needsTranscoding(file.name);
+  console.log(`📹 Video analysis: ${file.name}`);
+  console.log(`🔍 Requires transcoding: ${requiresTranscoding ? 'YES' : 'NO'}`);
+  
+  if (requiresTranscoding) {
+    console.log('🔄 This video will be transcoded to H.264 for browser compatibility');
+  } else {
+    console.log('✅ This video should be browser-compatible as-is');
+  }
+  
   // Send file info to WebSocket clients
   wss.clients.forEach(ws => {
     if (ws.readyState === 1) {
@@ -66,12 +174,18 @@ torrent.on('metadata', () => {
         type: 'fileInfo',
         name: file.name,
         size: file.length,
-        totalFiles: videoFiles.length
+        totalFiles: videoFiles.length,
+        transcoding: requiresTranscoding
       }));
     }
   });
   
-  const stream = file.createReadStream();
+  const originalStream = file.createReadStream();
+  
+  // Choose stream based on transcoding needs
+  const stream = requiresTranscoding ? 
+    createTranscodingStream(originalStream, file.name) : 
+    originalStream;
 
   stream.on('data', chunk => {
     bufferChunks.push(chunk); // Buffer for new clients

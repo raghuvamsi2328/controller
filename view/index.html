@@ -426,13 +426,20 @@
             
           case 'fileInfo':
             currentFile = message;
+            const transcodingStatus = message.transcoding ? 
+              '<span style="color: orange;">🔄 Transcoding to H.264</span>' : 
+              '<span style="color: green;">✅ Browser Compatible</span>';
+            
             fileInfoDiv.innerHTML = `
               <strong>Streaming:</strong> ${message.name}<br>
               <strong>File Size:</strong> ${formatBytes(message.size)}<br>
-              <strong>Video Files Found:</strong> ${message.totalFiles}
+              <strong>Video Files Found:</strong> ${message.totalFiles}<br>
+              <strong>Status:</strong> ${transcodingStatus}
             `;
             fileInfoDiv.style.display = 'block';
-            statusDiv.textContent = 'Streaming video file...';
+            statusDiv.textContent = message.transcoding ? 
+              'Transcoding video for browser compatibility...' : 
+              'Streaming video file...';
             
             // Initialize video player for this file
             initializeMediaSource(message.name);
