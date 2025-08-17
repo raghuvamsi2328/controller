@@ -1,0 +1,16 @@
+{
+  "name": "torrentstreamer",
+  "version": "1.0.0",
+  "description": "stream torrents over ws using torren hash",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "webtorrent": "^2.8.4",
+    "ws": "^8.18.3"
+  }
+}

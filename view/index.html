@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Torrent Stream via WebSocket</title>
+</head>
+<body>
+  <h1>Streaming Torrent Data</h1>
+  <div id="status">Connecting...</div>
+  <script>
+    const statusDiv = document.getElementById('status');
+    const ws = new WebSocket('ws://localhost:3000');
+
+    // Accumulate received bytes count
+    let totalBytes = 0;
+
+    ws.binaryType = 'arraybuffer';  // Expect binary data
+
+    ws.onopen = () => {
+      statusDiv.textContent = 'Connected to WebSocket server.';
+      console.log('WebSocket connection opened.');
+    };
+
+    ws.onmessage = (event) => {
+      if (typeof event.data === 'string' && event.data === 'done') {
+        statusDiv.textContent = 'Streaming complete.';
+        console.log('Received stream end signal.');
+      } else {
+        // Binary chunk received
+        const chunkSize = event.data.byteLength;
+        totalBytes += chunkSize;
+        statusDiv.textContent = `Received ${totalBytes} bytes so far...`;
+        console.log(`Received chunk: ${chunkSize} bytes`);
+        // Here, you can buffer chunks and feed to MediaSource for playback later.
+      }
+    };
+
+    ws.onerror = (error) => {
+      statusDiv.textContent = 'WebSocket error!';
+      console.error('WebSocket error:', error);
+    };
+
+    ws.onclose = () => {
+      statusDiv.textContent = 'WebSocket connection closed.';
+      console.log('WebSocket connection closed.');
+    };
+  </script>
+</body>
+</html>
