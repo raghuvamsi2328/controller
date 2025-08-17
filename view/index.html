@@ -61,13 +61,27 @@
     </div>
   </div>
 
+  <div style="margin: 20px 0;">
+    <button id="testVideoBtn" style="padding: 10px 20px; background: #007bff; color: white; border: none; border-radius: 5px; cursor: pointer;">
+      🎬 Test Video Player (Demo Mode)
+    </button>
+    <small style="display: block; margin-top: 5px; color: #666;">
+      Click to test the video player with a sample video file
+    </small>
+  </div>
+
   <div id="videoContainer" style="margin: 20px 0; display: none;">
     <h3>Video Player</h3>
-    <video id="videoPlayer" controls width="100%" style="max-width: 800px; background: #000;">
+    <video id="videoPlayer" controls width="100%" style="max-width: 800px; background: #000;" preload="none">
       Your browser does not support the video tag.
     </video>
     <div id="playbackInfo" style="margin-top: 10px; font-size: 12px; color: #666;">
       Buffering video data...
+    </div>
+    <div id="videoControls" style="margin-top: 10px;">
+      <button id="playBtn" style="margin-right: 10px;">▶️ Play</button>
+      <button id="pauseBtn" style="margin-right: 10px;">⏸️ Pause</button>
+      <span id="timeDisplay" style="margin-left: 10px; font-family: monospace;">0:00 / 0:00</span>
     </div>
   </div>
 
@@ -80,6 +94,10 @@
     const videoContainer = document.getElementById('videoContainer');
     const videoPlayer = document.getElementById('videoPlayer');
     const playbackInfo = document.getElementById('playbackInfo');
+    const playBtn = document.getElementById('playBtn');
+    const pauseBtn = document.getElementById('pauseBtn');
+    const timeDisplay = document.getElementById('timeDisplay');
+    const testVideoBtn = document.getElementById('testVideoBtn');
     
     const ws = new WebSocket('ws://localhost:3001');
 
@@ -102,20 +120,26 @@
       if (extension === 'mp4') {
         mimeType = 'video/mp4; codecs="avc1.42E01E, mp4a.40.2"';
       } else if (extension === 'mkv') {
-        mimeType = 'video/webm; codecs="vp8, vorbis"'; // MKV often needs transcoding
+        // Try WebM first, then fallback to MP4
+        mimeType = 'video/webm; codecs="vp9, opus"';
+        if (!MediaSource.isTypeSupported(mimeType)) {
+          mimeType = 'video/mp4; codecs="avc1.42E01E, mp4a.40.2"';
+        }
+      } else {
+        mimeType = 'video/mp4; codecs="avc1.42E01E, mp4a.40.2"'; // Default fallback
       }
       
       if (!MediaSource.isTypeSupported(mimeType)) {
         console.warn('MIME type not supported:', mimeType);
         playbackInfo.textContent = 'Video format may not be directly playable. Trying generic MP4...';
-        mimeType = 'video/mp4'; // Fallback
+        mimeType = 'video/mp4'; // Minimal fallback
       }
       
       mediaSource = new MediaSource();
       videoPlayer.src = URL.createObjectURL(mediaSource);
       
       mediaSource.addEventListener('sourceopen', () => {
-        console.log('MediaSource opened');
+        console.log('MediaSource opened with MIME type:', mimeType);
         try {
           sourceBuffer = mediaSource.addSourceBuffer(mimeType);
           sourceBuffer.addEventListener('updateend', onSourceBufferUpdateEnd);
@@ -126,6 +150,7 @@
           
           playbackInfo.textContent = 'Ready to play video. Buffering...';
           videoContainer.style.display = 'block';
+          setupVideoControls();
         } catch (e) {
           console.error('Error creating SourceBuffer:', e);
           playbackInfo.textContent = 'Error: Cannot create video buffer. Format may not be supported.';
@@ -142,6 +167,64 @@
       });
     }
     
+    function setupVideoControls() {
+      // Custom play button
+      playBtn.addEventListener('click', () => {
+        videoPlayer.play().then(() => {
+          console.log('Video started playing');
+        }).catch(e => {
+          console.error('Play failed:', e);
+          playbackInfo.textContent = 'Play failed: ' + e.message;
+        });
+      });
+      
+      // Custom pause button
+      pauseBtn.addEventListener('click', () => {
+        videoPlayer.pause();
+        console.log('Video paused');
+      });
+      
+      // Time update handler
+      videoPlayer.addEventListener('timeupdate', () => {
+        const current = formatTime(videoPlayer.currentTime);
+        const duration = formatTime(videoPlayer.duration || 0);
+        timeDisplay.textContent = `${current} / ${duration}`;
+      });
+      
+      // Video event listeners
+      videoPlayer.addEventListener('loadstart', () => {
+        console.log('Video load start');
+        playbackInfo.textContent = 'Loading video...';
+      });
+      
+      videoPlayer.addEventListener('canplay', () => {
+        console.log('Video can play');
+        playbackInfo.textContent = 'Video ready to play';
+      });
+      
+      videoPlayer.addEventListener('playing', () => {
+        console.log('Video playing');
+        playbackInfo.textContent = 'Video playing';
+      });
+      
+      videoPlayer.addEventListener('waiting', () => {
+        console.log('Video waiting/buffering');
+        playbackInfo.textContent = 'Buffering...';
+      });
+      
+      videoPlayer.addEventListener('error', (e) => {
+        console.error('Video error:', e);
+        playbackInfo.textContent = 'Video playback error';
+      });
+    }
+    
+    function formatTime(seconds) {
+      if (isNaN(seconds)) return '0:00';
+      const mins = Math.floor(seconds / 60);
+      const secs = Math.floor(seconds % 60);
+      return `${mins}:${secs.toString().padStart(2, '0')}`;
+    }
+    
     function onSourceBufferUpdateEnd() {
       isAppending = false;
       
@@ -154,12 +237,16 @@
       if (videoPlayer.buffered.length > 0) {
         const bufferedEnd = videoPlayer.buffered.end(videoPlayer.buffered.length - 1);
         const duration = videoPlayer.duration || 0;
-        playbackInfo.textContent = `Buffered: ${bufferedEnd.toFixed(1)}s${duration ? ` / ${duration.toFixed(1)}s` : ''}`;
+        const bufferedMB = (bufferedEnd * 1000).toFixed(1); // Rough estimate
+        playbackInfo.textContent = `Buffered: ${bufferedEnd.toFixed(1)}s${duration ? ` / ${duration.toFixed(1)}s` : ''} (~${bufferedMB}KB)`;
         
-        // Auto-play when enough data is buffered
+        // Auto-play when enough data is buffered (3 seconds)
         if (bufferedEnd > 3 && videoPlayer.paused && videoPlayer.readyState >= 3) {
-          videoPlayer.play().catch(e => {
-            console.log('Auto-play failed:', e);
+          videoPlayer.play().then(() => {
+            console.log('Auto-play started');
+            playbackInfo.textContent += ' - Auto-playing';
+          }).catch(e => {
+            console.log('Auto-play failed (user interaction required):', e.message);
             playbackInfo.textContent += ' (Click play to start)';
           });
         }
@@ -194,6 +281,34 @@
       statusDiv.textContent = 'Connected to WebSocket server. Waiting for video files...';
       console.log('WebSocket connection opened.');
     };
+
+    // Test video player functionality
+    testVideoBtn.addEventListener('click', () => {
+      // Simulate receiving file info for demo
+      const demoFile = {
+        name: 'sample_video.mp4',
+        size: 50000000, // 50MB demo size
+        totalFiles: 1
+      };
+      
+      currentFile = demoFile;
+      fileInfoDiv.innerHTML = `
+        <strong>Demo Mode:</strong> ${demoFile.name}<br>
+        <strong>File Size:</strong> ${formatBytes(demoFile.size)}<br>
+        <strong>Video Files Found:</strong> ${demoFile.totalFiles}
+      `;
+      fileInfoDiv.style.display = 'block';
+      statusDiv.textContent = 'Demo mode: Video player ready';
+      
+      // Initialize video player for demo
+      initializeMediaSource(demoFile.name);
+      
+      // Use a sample video URL for testing (Big Buck Bunny - Creative Commons)
+      videoPlayer.src = 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4';
+      videoContainer.style.display = 'block';
+      playbackInfo.textContent = 'Demo video loaded - click play to test';
+      setupVideoControls();
+    });
 
     ws.onmessage = (event) => {
       // Handle both binary chunks and JSON messages
@@ -285,14 +400,18 @@
     ws.binaryType = 'arraybuffer';
 
     ws.onerror = (error) => {
-      statusDiv.textContent = 'WebSocket error!';
-      errorDiv.textContent = 'Connection error occurred';
+      statusDiv.textContent = 'WebSocket error! Server may not be running.';
+      errorDiv.innerHTML = `
+        <strong>Connection Error:</strong><br>
+        Make sure the WebSocket server is running on port 3001<br>
+        <small>Run: <code>node index.js</code> in the controller folder</small>
+      `;
       errorDiv.style.display = 'block';
       console.error('WebSocket error:', error);
     };
 
     ws.onclose = () => {
-      statusDiv.textContent = 'WebSocket connection closed.';
+      statusDiv.textContent = 'WebSocket connection closed. You can still test the video player in demo mode.';
       console.log('WebSocket connection closed.');
     };
     
