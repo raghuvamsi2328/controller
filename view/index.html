@@ -621,7 +621,11 @@
                     addLog('SourceBuffer error', 'error', { error: e });
                 });
                 
+                // Set mode to 'sequence' for streaming
+                sourceBuffer.mode = 'sequence';
+                
                 playbackStateEl.textContent = 'Ready';
+                addLog('SourceBuffer created and ready for streaming', 'success');
                 
                 // Process any queued chunks
                 if (chunks.length > 0) {
@@ -638,6 +642,26 @@
         function onSourceBufferUpdate() {
             isAppending = false;
             updateBufferStats();
+            
+            addLog(`SourceBuffer updated - buffered ranges: ${videoPlayer.buffered.length}`, 'video');
+            
+            // Check if we now have enough data to start playing
+            if (videoPlayer.buffered.length > 0 && videoPlayer.paused && videoPlayer.readyState >= 2) {
+                const bufferedEnd = videoPlayer.buffered.end(0);
+                if (bufferedEnd > 0.5) { // Start playing with just 0.5 seconds of buffer
+                    addLog('Sufficient buffer available - attempting auto-play', 'info');
+                    setTimeout(() => {
+                        if (videoPlayer.paused) {
+                            videoPlayer.play().then(() => {
+                                addLog('Auto-play successful after buffer update', 'success');
+                                playbackStateEl.textContent = 'Playing';
+                            }).catch(error => {
+                                addLog('Auto-play failed after buffer update', 'warning', { error: error.message });
+                            });
+                        }
+                    }, 100);
+                }
+            }
             
             // Continue processing chunks
             if (chunks.length > 0 && !sourceBuffer.updating) {
@@ -704,28 +728,39 @@
         playBtn.addEventListener('click', () => {
             addLog('Play button clicked', 'video');
             
-            // Check if video is ready to play
-            if (videoPlayer.readyState === 0) {
-                addLog('Video not loaded yet - waiting for data', 'warning');
+            // Check MediaSource and SourceBuffer status first
+            if (!mediaSource || !sourceBuffer) {
+                addLog('MediaSource not initialized yet - please wait for video stream', 'warning');
                 return;
             }
             
-            // Check buffered data more carefully
+            if (mediaSource.readyState !== 'open') {
+                addLog(`MediaSource not ready (state: ${mediaSource.readyState})`, 'warning');
+                return;
+            }
+            
+            // Log current video state for debugging
+            addLog(`Video readyState: ${videoPlayer.readyState}, buffered ranges: ${videoPlayer.buffered.length}`, 'info');
+            
+            // Check buffered data
             if (videoPlayer.buffered.length === 0) {
-                addLog('No buffered ranges available - trying to play anyway', 'warning');
+                addLog('No buffered ranges available - attempting to play', 'warning');
             } else {
                 const bufferedEnd = videoPlayer.buffered.end(0);
                 addLog(`Buffered data available: ${bufferedEnd.toFixed(1)}s`, 'info');
-                if (bufferedEnd < 2) {
-                    addLog(`Limited buffer for playback (${bufferedEnd.toFixed(1)}s)`, 'warning');
-                }
             }
             
+            // Attempt to play regardless of readyState for streaming content
             videoPlayer.play().then(() => {
                 addLog('Video playback started successfully', 'success');
                 playbackStateEl.textContent = 'Playing';
             }).catch(error => {
                 addLog('Video playback failed', 'error', { error: error.message });
+                
+                // If autoplay failed, try with user interaction
+                if (error.name === 'NotAllowedError') {
+                    addLog('Autoplay blocked - manual play required', 'warning');
+                }
             });
         });
 
@@ -753,26 +788,45 @@
             updateBufferStats();
         });
 
+        // Add additional video event listeners for better debugging
         videoPlayer.addEventListener('loadstart', () => {
             addLog('Video load started', 'video');
             playbackStateEl.textContent = 'Loading';
+        });
+
+        videoPlayer.addEventListener('progress', () => {
+            addLog('Video download in progress', 'video');
+        });
+
+        videoPlayer.addEventListener('suspend', () => {
+            addLog('Video loading suspended', 'video');
+        });
+
+        videoPlayer.addEventListener('abort', () => {
+            addLog('Video loading aborted', 'warning');
+        });
+
+        videoPlayer.addEventListener('emptied', () => {
+            addLog('Video emptied', 'warning');
+        });
+
+        videoPlayer.addEventListener('stalled', () => {
+            addLog('Video download stalled', 'warning');
         });
 
         videoPlayer.addEventListener('canplay', () => {
             addLog('Video can play - sufficient data buffered', 'success');
             playbackStateEl.textContent = 'Can Play';
             
-            // Auto-play when video is ready (with a small delay to ensure buffer is stable)
-            setTimeout(() => {
-                if (videoPlayer.paused) {
-                    videoPlayer.play().then(() => {
-                        addLog('Auto-playing video', 'success');
-                        playbackStateEl.textContent = 'Playing';
-                    }).catch(error => {
-                        addLog('Auto-play failed - user interaction may be required', 'warning', { error: error.message });
-                    });
-                }
-            }, 100);
+            // Auto-play when video is ready (immediate attempt for streaming)
+            if (videoPlayer.paused) {
+                videoPlayer.play().then(() => {
+                    addLog('Auto-playing video', 'success');
+                    playbackStateEl.textContent = 'Playing';
+                }).catch(error => {
+                    addLog('Auto-play failed - user interaction may be required', 'warning', { error: error.message });
+                });
+            }
         });
 
         videoPlayer.addEventListener('playing', () => {
