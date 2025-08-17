@@ -680,10 +680,17 @@
                 const bufferedEnd = videoPlayer.buffered.end(videoPlayer.buffered.length - 1);
                 bufferLevelEl.textContent = `${bufferedEnd.toFixed(1)}s`;
                 
-                // Update playback state based on buffer level
-                if (bufferedEnd > 5 && videoPlayer.paused) {
+                // Update playback state based on buffer level and video state
+                if (videoPlayer.paused && bufferedEnd > 1) {
                     playbackStateEl.textContent = 'Ready to Play';
                 } else if (videoPlayer.readyState >= 3) {
+                    playbackStateEl.textContent = 'Can Play';
+                } else if (videoPlayer.readyState >= 1) {
+                    playbackStateEl.textContent = 'Loading';
+                }
+            } else {
+                bufferLevelEl.textContent = '0s';
+                if (videoPlayer.readyState < 3) {
                     playbackStateEl.textContent = 'Buffering';
                 }
             }
@@ -697,14 +704,21 @@
         playBtn.addEventListener('click', () => {
             addLog('Play button clicked', 'video');
             
-            if (videoPlayer.buffered.length === 0) {
-                addLog('No buffered data available for playback', 'warning');
+            // Check if video is ready to play
+            if (videoPlayer.readyState === 0) {
+                addLog('Video not loaded yet - waiting for data', 'warning');
                 return;
             }
             
-            const bufferedEnd = videoPlayer.buffered.end(0);
-            if (bufferedEnd < 2) {
-                addLog(`Insufficient buffer for smooth playback (${bufferedEnd.toFixed(1)}s)`, 'warning');
+            // Check buffered data more carefully
+            if (videoPlayer.buffered.length === 0) {
+                addLog('No buffered ranges available - trying to play anyway', 'warning');
+            } else {
+                const bufferedEnd = videoPlayer.buffered.end(0);
+                addLog(`Buffered data available: ${bufferedEnd.toFixed(1)}s`, 'info');
+                if (bufferedEnd < 2) {
+                    addLog(`Limited buffer for playback (${bufferedEnd.toFixed(1)}s)`, 'warning');
+                }
             }
             
             videoPlayer.play().then(() => {
@@ -722,6 +736,16 @@
         });
 
         // Video event listeners
+        videoPlayer.addEventListener('loadedmetadata', () => {
+            addLog('Video metadata loaded', 'success');
+            updateBufferStats();
+        });
+
+        videoPlayer.addEventListener('loadeddata', () => {
+            addLog('Video data loaded', 'success');
+            updateBufferStats();
+        });
+
         videoPlayer.addEventListener('timeupdate', () => {
             const current = formatTime(videoPlayer.currentTime);
             const duration = formatTime(videoPlayer.duration || 0);
@@ -738,13 +762,17 @@
             addLog('Video can play - sufficient data buffered', 'success');
             playbackStateEl.textContent = 'Can Play';
             
-            // Auto-play when video is ready
-            videoPlayer.play().then(() => {
-                addLog('Auto-playing video', 'success');
-                playbackStateEl.textContent = 'Playing';
-            }).catch(error => {
-                addLog('Auto-play failed - user interaction may be required', 'warning', { error: error.message });
-            });
+            // Auto-play when video is ready (with a small delay to ensure buffer is stable)
+            setTimeout(() => {
+                if (videoPlayer.paused) {
+                    videoPlayer.play().then(() => {
+                        addLog('Auto-playing video', 'success');
+                        playbackStateEl.textContent = 'Playing';
+                    }).catch(error => {
+                        addLog('Auto-play failed - user interaction may be required', 'warning', { error: error.message });
+                    });
+                }
+            }, 100);
         });
 
         videoPlayer.addEventListener('playing', () => {
