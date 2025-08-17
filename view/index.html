@@ -355,7 +355,7 @@
         let chunkCount = 0;
         let currentFile = null;
         let mimeType = '';
-        let isPlayerEnabled = false;
+        let isPlayerEnabled = true; // Enable player by default
         let currentLogFilter = 'all';
 
         // ===== STEP 2: LOGGING SYSTEM =====
@@ -509,12 +509,7 @@
             addLog(`Received video chunk: ${formatBytes(chunkSize)} (Total: ${formatBytes(totalBytes)})`, 'video');
             
             // Add chunk to video buffer
-            if (isPlayerEnabled) {
-                addVideoChunk(new Uint8Array(arrayBuffer));
-            } else {
-                chunks.push(new Uint8Array(arrayBuffer));
-                addLog('Video chunk queued - player not enabled yet', 'warning');
-            }
+            addVideoChunk(new Uint8Array(arrayBuffer));
         }
 
         function handleFileInfo(message) {
@@ -531,9 +526,10 @@
             
             addLog(`File info received: ${message.name}`, 'success', message);
             
-            if (!isPlayerEnabled) {
-                addLog('Auto-enabling video player for incoming stream', 'info');
-                enableVideoPlayer();
+            // Initialize MediaSource when we receive file info
+            if (!mediaSource) {
+                addLog('Initializing MediaSource for incoming stream', 'info');
+                initializeMediaSource();
             }
         }
 
@@ -618,6 +614,7 @@
             addLog('MediaSource opened successfully', 'success');
             
             try {
+                // Only create sourceBuffer after sourceopen event
                 sourceBuffer = mediaSource.addSourceBuffer(mimeType);
                 sourceBuffer.addEventListener('updateend', onSourceBufferUpdate);
                 sourceBuffer.addEventListener('error', (e) => {
@@ -740,6 +737,14 @@
         videoPlayer.addEventListener('canplay', () => {
             addLog('Video can play - sufficient data buffered', 'success');
             playbackStateEl.textContent = 'Can Play';
+            
+            // Auto-play when video is ready
+            videoPlayer.play().then(() => {
+                addLog('Auto-playing video', 'success');
+                playbackStateEl.textContent = 'Playing';
+            }).catch(error => {
+                addLog('Auto-play failed - user interaction may be required', 'warning', { error: error.message });
+            });
         });
 
         videoPlayer.addEventListener('playing', () => {
@@ -779,6 +784,11 @@
         console.log('🚀 Step 8: Starting application...');
         addLog('Unified Video Player & Logger initialized successfully', 'success');
         addLog('Ready to receive WebSocket video streams', 'info');
+        addLog('Player enabled by default for automatic playback', 'info');
+        
+        // Update button state since player is enabled by default
+        enablePlayerBtn.textContent = '✅ Player Enabled';
+        enablePlayerBtn.disabled = true;
         
         // Start WebSocket connection
         connectWebSocket();
