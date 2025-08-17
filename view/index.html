@@ -61,19 +61,134 @@
     </div>
   </div>
 
+  <div id="videoContainer" style="margin: 20px 0; display: none;">
+    <h3>Video Player</h3>
+    <video id="videoPlayer" controls width="100%" style="max-width: 800px; background: #000;">
+      Your browser does not support the video tag.
+    </video>
+    <div id="playbackInfo" style="margin-top: 10px; font-size: 12px; color: #666;">
+      Buffering video data...
+    </div>
+  </div>
+
   <script>
     const statusDiv = document.getElementById('status');
     const fileInfoDiv = document.getElementById('fileInfo');
     const errorDiv = document.getElementById('error');
     const totalBytesSpan = document.getElementById('totalBytes');
     const chunkCountSpan = document.getElementById('chunkCount');
+    const videoContainer = document.getElementById('videoContainer');
+    const videoPlayer = document.getElementById('videoPlayer');
+    const playbackInfo = document.getElementById('playbackInfo');
     
-    const ws = new WebSocket('ws://localhost:3000');
+    const ws = new WebSocket('ws://localhost:3001');
 
     // Accumulate received bytes count
     let totalBytes = 0;
     let chunkCount = 0;
     let currentFile = null;
+    
+    // Video streaming variables
+    let mediaSource = null;
+    let sourceBuffer = null;
+    let chunks = [];
+    let isAppending = false;
+    let mimeType = '';
+
+    // Initialize MediaSource for video playback
+    function initializeMediaSource(fileName) {
+      // Determine MIME type based on file extension
+      const extension = fileName.toLowerCase().split('.').pop();
+      if (extension === 'mp4') {
+        mimeType = 'video/mp4; codecs="avc1.42E01E, mp4a.40.2"';
+      } else if (extension === 'mkv') {
+        mimeType = 'video/webm; codecs="vp8, vorbis"'; // MKV often needs transcoding
+      }
+      
+      if (!MediaSource.isTypeSupported(mimeType)) {
+        console.warn('MIME type not supported:', mimeType);
+        playbackInfo.textContent = 'Video format may not be directly playable. Trying generic MP4...';
+        mimeType = 'video/mp4'; // Fallback
+      }
+      
+      mediaSource = new MediaSource();
+      videoPlayer.src = URL.createObjectURL(mediaSource);
+      
+      mediaSource.addEventListener('sourceopen', () => {
+        console.log('MediaSource opened');
+        try {
+          sourceBuffer = mediaSource.addSourceBuffer(mimeType);
+          sourceBuffer.addEventListener('updateend', onSourceBufferUpdateEnd);
+          sourceBuffer.addEventListener('error', (e) => {
+            console.error('SourceBuffer error:', e);
+            playbackInfo.textContent = 'Error: Video format not compatible with browser';
+          });
+          
+          playbackInfo.textContent = 'Ready to play video. Buffering...';
+          videoContainer.style.display = 'block';
+        } catch (e) {
+          console.error('Error creating SourceBuffer:', e);
+          playbackInfo.textContent = 'Error: Cannot create video buffer. Format may not be supported.';
+        }
+      });
+      
+      mediaSource.addEventListener('sourceended', () => {
+        console.log('MediaSource ended');
+      });
+      
+      mediaSource.addEventListener('error', (e) => {
+        console.error('MediaSource error:', e);
+        playbackInfo.textContent = 'MediaSource error occurred';
+      });
+    }
+    
+    function onSourceBufferUpdateEnd() {
+      isAppending = false;
+      
+      // Append next chunk if available
+      if (chunks.length > 0 && !sourceBuffer.updating) {
+        appendNextChunk();
+      }
+      
+      // Update playback info
+      if (videoPlayer.buffered.length > 0) {
+        const bufferedEnd = videoPlayer.buffered.end(videoPlayer.buffered.length - 1);
+        const duration = videoPlayer.duration || 0;
+        playbackInfo.textContent = `Buffered: ${bufferedEnd.toFixed(1)}s${duration ? ` / ${duration.toFixed(1)}s` : ''}`;
+        
+        // Auto-play when enough data is buffered
+        if (bufferedEnd > 3 && videoPlayer.paused && videoPlayer.readyState >= 3) {
+          videoPlayer.play().catch(e => {
+            console.log('Auto-play failed:', e);
+            playbackInfo.textContent += ' (Click play to start)';
+          });
+        }
+      }
+    }
+    
+    function appendNextChunk() {
+      if (chunks.length > 0 && sourceBuffer && !sourceBuffer.updating && !isAppending) {
+        isAppending = true;
+        const chunk = chunks.shift();
+        try {
+          sourceBuffer.appendBuffer(chunk);
+        } catch (e) {
+          console.error('Error appending buffer:', e);
+          isAppending = false;
+          playbackInfo.textContent = 'Error appending video data';
+        }
+      }
+    }
+    
+    function addVideoChunk(chunkData) {
+      // chunkData is already a Uint8Array from ArrayBuffer
+      chunks.push(chunkData);
+      
+      // Start appending if not already doing so
+      if (sourceBuffer && !isAppending) {
+        appendNextChunk();
+      }
+    }
 
     ws.onopen = () => {
       statusDiv.textContent = 'Connected to WebSocket server. Waiting for video files...';
@@ -81,6 +196,31 @@
     };
 
     ws.onmessage = (event) => {
+      // Handle both binary chunks and JSON messages
+      if (event.data instanceof ArrayBuffer) {
+        // Binary chunk received
+        const chunkSize = event.data.byteLength;
+        totalBytes += chunkSize;
+        chunkCount++;
+        
+        totalBytesSpan.textContent = formatBytes(totalBytes);
+        chunkCountSpan.textContent = chunkCount.toLocaleString();
+        
+        if (currentFile) {
+          const progress = ((totalBytes / currentFile.size) * 100).toFixed(1);
+          statusDiv.textContent = `Streaming: ${progress}% (${formatBytes(totalBytes)} / ${formatBytes(currentFile.size)})`;
+        }
+        
+        console.log(`Received binary chunk: ${chunkSize} bytes`);
+        
+        // Add chunk to video player
+        if (mediaSource && mediaSource.readyState === 'open') {
+          addVideoChunk(new Uint8Array(event.data));
+        }
+        return;
+      }
+      
+      // JSON message received
       try {
         const message = JSON.parse(event.data);
         
@@ -98,29 +238,26 @@
             `;
             fileInfoDiv.style.display = 'block';
             statusDiv.textContent = 'Streaming video file...';
-            break;
             
-          case 'chunk':
-            // Process video chunk
-            const chunkSize = message.size;
-            totalBytes += chunkSize;
-            chunkCount++;
-            
-            totalBytesSpan.textContent = formatBytes(totalBytes);
-            chunkCountSpan.textContent = chunkCount.toLocaleString();
-            
-            if (currentFile) {
-              const progress = ((totalBytes / currentFile.size) * 100).toFixed(1);
-              statusDiv.textContent = `Streaming: ${progress}% (${formatBytes(totalBytes)} / ${formatBytes(currentFile.size)})`;
-            }
-            
-            console.log(`Received chunk: ${chunkSize} bytes`);
-            // Here you can process the video chunk data (message.data contains the byte array)
+            // Initialize video player for this file
+            initializeMediaSource(message.name);
             break;
             
           case 'streamEnd':
             statusDiv.textContent = message.message;
             console.log('Stream ended:', message.message);
+            
+            // End the media source
+            if (mediaSource && mediaSource.readyState === 'open') {
+              try {
+                if (sourceBuffer && !sourceBuffer.updating) {
+                  mediaSource.endOfStream();
+                  playbackInfo.textContent = 'Video stream complete';
+                }
+              } catch (e) {
+                console.error('Error ending stream:', e);
+              }
+            }
             break;
             
           case 'streamError':
@@ -143,6 +280,9 @@
         console.error('Error parsing message:', err);
       }
     };
+
+    // Set binary type for WebSocket to receive ArrayBuffer
+    ws.binaryType = 'arraybuffer';
 
     ws.onerror = (error) => {
       statusDiv.textContent = 'WebSocket error!';

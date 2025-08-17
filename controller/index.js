@@ -7,7 +7,7 @@ import { WebSocketServer } from 'ws';
 const torrentId = 'magnet:?xt=urn:btih:7969590D4697BDF90F680729D15560C9F95B160E';
 
 const client = new WebTorrent();
-const wss = new WebSocketServer({ port: 3000 });
+const wss = new WebSocketServer({ port: 3001 });
 
 let bufferChunks = [];
 
@@ -67,15 +67,11 @@ torrent.on('metadata', () => {
 
   stream.on('data', chunk => {
     bufferChunks.push(chunk); // Buffer for new clients
-    // Send chunk to all connected clients with metadata
+    // Send chunk to all connected clients
     wss.clients.forEach(ws => {
       if (ws.readyState === 1) { // WebSocket.OPEN
-        // Send chunk with type identifier
-        ws.send(JSON.stringify({
-          type: 'chunk',
-          data: Array.from(new Uint8Array(chunk)),
-          size: chunk.length
-        }));
+        // Send raw binary data for better performance
+        ws.send(chunk);
       }
     });
     console.log(`Sent chunk of size: ${chunk.length} bytes (${file.name})`);
@@ -129,10 +125,10 @@ client.on('error', err => {
 });
 
 // WebSocket server setup
-console.log('WebSocket server starting on port 3000...');
+console.log('WebSocket server starting on port 3001...');
 
 wss.on('listening', () => {
-  console.log('WebSocket server is listening on port 3000');
+  console.log('WebSocket server is listening on port 3001');
 });
 
 wss.on('connection', ws => {
@@ -144,14 +140,10 @@ wss.on('connection', ws => {
     message: 'Connected to WebTorrent streaming server'
   }));
   
-  // Send all buffered chunks to new client
+  // Send all buffered chunks to new client (raw binary data)
   bufferChunks.forEach(chunk => {
     if (ws.readyState === 1) { // WebSocket.OPEN
-      ws.send(JSON.stringify({
-        type: 'chunk',
-        data: Array.from(new Uint8Array(chunk)),
-        size: chunk.length
-      }));
+      ws.send(chunk);
     }
   });
   
