@@ -102,14 +102,16 @@ function startStream(magnetLink) {
         const sourceStream = videoFile.createReadStream();
         const playlistPath = path.join(HLS_DIR, 'playlist.m3u8');
 
-        // **CRITICAL FIX**: This error handler prevents a stream read error from crashing the server.
+        // --- NEW DIAGNOSTIC LOGGING ---
+        // Log all major events on the source stream to see if it's closing unexpectedly.
         sourceStream.on('error', (err) => {
             console.error('❌ Torrent stream read error:', err.message);
             broadcast({ type: 'error', message: 'Failed to read from torrent stream.' });
-            if (ffmpegProcess) {
-                ffmpegProcess.kill('SIGKILL');
-            }
+            if (ffmpegProcess) ffmpegProcess.kill('SIGKILL');
         });
+        sourceStream.on('end', () => console.log('ℹ️ Source stream: "end" event fired.'));
+        sourceStream.on('close', () => console.log('ℹ️ Source stream: "close" event fired.'));
+        // --- END NEW DIAGNOSTIC LOGGING ---
 
         ffmpegProcess = ffmpeg(sourceStream)
             .videoCodec('libx264')
@@ -135,8 +137,7 @@ function startStream(magnetLink) {
                 });
             })
             .on('error', (err, stdout, stderr) => {
-                // This catches FFmpeg-specific errors (e.g., invalid data)
-                if (!err.message.includes('SIGKILL')) { // Don't log errors from us killing the process
+                if (!err.message.includes('SIGKILL')) {
                     console.error('❌ FFmpeg process error:', err.message);
                     broadcast({ type: 'error', message: 'Failed to transcode video.' });
                 }
@@ -164,7 +165,6 @@ wss.on('connection', ws => {
     ws.on('message', message => {
         try {
             const data = JSON.parse(message);
-            console.log('Received message:', data.type);
             if (data.type === 'setMagnetLink' && data.magnetLink) {
                 startStream(data.magnetLink);
             } else if (data.type === 'startDefault') {
@@ -184,13 +184,21 @@ server.listen(PORT, () => {
     console.log('🎬 Waiting for client to provide a magnet link...');
 });
 
-// --- Global Error Handler ---
-// This is a critical addition. It will catch any unhandled errors that would
-// otherwise crash the server, log them, and allow the server to keep running.
+// --- NEW & IMPROVED GLOBAL ERROR HANDLERS ---
 process.on('uncaughtException', (err, origin) => {
-    console.error('🔥🔥🔥 UNCAUGHT EXCEPTION! SERVER WILL NOT CRASH 🔥🔥🔥');
+    console.error('🔥🔥🔥 UNCAUGHT EXCEPTION! 🔥🔥🔥');
     console.error(`Caught exception: ${err}\n` + `Exception origin: ${origin}`);
-    console.error(err.stack); // Log the full stack trace
-    // Optionally, notify clients that a fatal error occurred
-    broadcast({ type: 'error', message: 'A fatal server error occurred. Please try again.' });
+    console.error(err.stack);
+    broadcast({ type: 'error', message: 'A fatal server error occurred (uncaughtException).' });
 });
+
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('🔥🔥🔥 UNHANDLED REJECTION! 🔥🔥🔥');
+    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+    broadcast({ type: 'error', message: 'A fatal server error occurred (unhandledRejection).' });
+});
+
+process.on('exit', (code) => {
+    console.log(`👋 Process is exiting with code: ${code}`);
+});
+// --- END NEW HANDLERS ---
