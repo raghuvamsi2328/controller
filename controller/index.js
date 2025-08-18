@@ -57,20 +57,22 @@ function clearPreviousStream() {
 }
 
 function waitForPlaylist(playlistPath, callback, timeout = 30000) {
-    console.log('⏳ Waiting for playlist to be created...');
+    console.log('⏳ Waiting for playlist to be created and populated...');
     const interval = 200;
     let elapsedTime = 0;
+
     const check = setInterval(() => {
-        if (fs.existsSync(playlistPath)) {
+        // THE FIX: Check if the file exists AND has a size greater than 0.
+        if (fs.existsSync(playlistPath) && fs.statSync(playlistPath).size > 0) {
             clearInterval(check);
-            console.log('✅ Playlist found! Notifying client.');
-            callback(null);
+            console.log('✅ Playlist found and has content! Notifying client.');
+            callback(null); // Success
         } else {
             elapsedTime += interval;
             if (elapsedTime >= timeout) {
                 clearInterval(check);
                 const timeoutError = new Error('Timed out waiting for playlist file.');
-                console.error(`❌ ${timeoutError.message}`);
+                console.error(`❌ ${timeoutError.message} at ${playlistPath}`);
                 callback(timeoutError);
             }
         }
