@@ -59,6 +59,7 @@
         let isAppending = false;
         let totalBytes = 0;
         let chunkCount = 0;
+        let pendingCodec = null; // Add this line
 
         function log(message) {
             const timestamp = new Date().toLocaleTimeString();
@@ -100,7 +101,13 @@
             videoPlayer.src = URL.createObjectURL(mediaSource);
 
             mediaSource.addEventListener('sourceopen', () => {
-                log('MediaSource opened. Waiting for video info from server...');
+                log('MediaSource opened.');
+                // If codec info arrived before this event, setup the buffer now.
+                if (pendingCodec) {
+                    log('Pending codec found. Setting up SourceBuffer.');
+                    setupSourceBuffer(pendingCodec);
+                    pendingCodec = null; // Clear it after use
+                }
             });
 
             mediaSource.addEventListener('error', (e) => log('MediaSource error:', e));
@@ -206,7 +213,14 @@
                         if (msg.type === 'fileInfo') {
                             resetPlayerState();
                             fileName.textContent = `${msg.name} (${msg.transcoding ? 'Transcoded' : 'Direct Stream'})`;
-                            setupSourceBuffer(msg.codec);
+                            
+                            // If MediaSource is already open, setup buffer. Otherwise, store codec for later.
+                            if (mediaSource.readyState === 'open') {
+                                setupSourceBuffer(msg.codec);
+                            } else {
+                                log('MediaSource not open yet. Storing pending codec.');
+                                pendingCodec = msg.codec;
+                            }
                         } else if (msg.type === 'error') {
                             log(`SERVER ERROR: ${msg.message}`);
                         }
