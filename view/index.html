@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>HLS Video Streamer</title>
-    <!-- Include hls.js library from a CDN -->
+    <!-- 1. Include hls.js library from a CDN -->
     <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 20px; background-color: #f4f4f9; color: #333; }
@@ -14,7 +14,7 @@
         #magnetInput { width: calc(100% - 24px); padding: 10px; border: 1px solid #ccc; border-radius: 4px; font-family: monospace; font-size: 14px; }
         video { width: 100%; background: #000; border-radius: 5px; margin-top: 10px; }
         .actions { display: flex; justify-content: center; margin: 15px 0; gap: 10px; }
-        button { background-color: #007bff; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; font-size: 16px; transition: background-color: 0.2s; }
+        button { background-color: #007bff; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; font-size: 16px; transition: background-color 0.2s; }
         button:hover { background-color: #0056b3; }
         .logs { height: 150px; overflow-y: auto; background: #333; color: #f8f8f8; border: 1px solid #444; padding: 10px; font-family: monospace; font-size: 12px; border-radius: 5px; white-space: pre-wrap; }
     </style>
@@ -64,21 +64,34 @@
         function initializePlayer(streamUrl) {
             log(`Initializing player for URL: ${streamUrl}`);
             if (hls) {
-                hls.destroy(); // Clean up previous instance
+                hls.destroy(); // Clean up previous instance before creating a new one
             }
-            hls = new Hls();
-            hls.loadSource(streamUrl);
-            hls.attachMedia(videoPlayer);
-            hls.on(Hls.Events.MANIFEST_PARSED, () => {
-                log('Manifest parsed, starting playback.');
-                videoPlayer.play();
-            });
-            hls.on(Hls.Events.ERROR, (event, data) => {
-                if (data.fatal) {
-                    log(`HLS FATAL ERROR: ${data.type} - ${data.details}`);
-                    console.error('HLS Error:', data);
-                }
-            });
+
+            // Check if the browser supports HLS natively (like Safari)
+            if (videoPlayer.canPlayType('application/vnd.apple.mpegurl')) {
+                log('Browser supports HLS natively.');
+                videoPlayer.src = streamUrl;
+                videoPlayer.addEventListener('loadedmetadata', () => {
+                    videoPlayer.play();
+                });
+            } else if (Hls.isSupported()) {
+                log('Using hls.js to play stream.');
+                hls = new Hls();
+                hls.loadSource(streamUrl);
+                hls.attachMedia(videoPlayer);
+                hls.on(Hls.Events.MANIFEST_PARSED, () => {
+                    log('Manifest parsed, starting playback.');
+                    videoPlayer.play();
+                });
+                hls.on(Hls.Events.ERROR, (event, data) => {
+                    if (data.fatal) {
+                        log(`HLS FATAL ERROR: ${data.type} - ${data.details}`);
+                        console.error('HLS Error:', data);
+                    }
+                });
+            } else {
+                log('Error: This browser does not support HLS playback.');
+            }
         }
 
         // --- WebSocket Connection ---
