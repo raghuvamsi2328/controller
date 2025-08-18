@@ -95,19 +95,20 @@
             if (e.key === 'Enter') startStream();
         });
 
-        function initializeMediaSource() {
-            log('Initializing MediaSource...');
+        function initializeMediaSource(codec) {
+            log('Initializing new MediaSource...');
+            if (!MediaSource.isTypeSupported(codec)) {
+                log(`FATAL: Codec not supported by browser: ${codec}`);
+                return;
+            }
+
             mediaSource = new MediaSource();
             videoPlayer.src = URL.createObjectURL(mediaSource);
 
             mediaSource.addEventListener('sourceopen', () => {
-                log('MediaSource opened.');
-                // If codec info arrived before this event, setup the buffer now.
-                if (pendingCodec) {
-                    log('Pending codec found. Setting up SourceBuffer.');
-                    setupSourceBuffer(pendingCodec);
-                    pendingCodec = null; // Clear it after use
-                }
+                log('MediaSource opened. Setting up SourceBuffer.');
+                // The 'sourceopen' event guarantees the MediaSource is ready.
+                setupSourceBuffer(codec);
             });
 
             mediaSource.addEventListener('error', (e) => log('MediaSource error:', e));
@@ -115,6 +116,7 @@
 
         function resetPlayerState() {
             log('Resetting player state for new stream...');
+            // Clear the queue of data chunks
             receivedChunks = [];
             chunkCount = 0;
             totalBytes = 0;
@@ -122,40 +124,26 @@
             fileName.textContent = 'N/A';
             updateStats();
 
-            if (mediaSource && sourceBuffer) {
-                try {
-                    // Abort any pending appends before removing the buffer. This is the key fix.
-                    if (sourceBuffer.updating) {
-                        sourceBuffer.abort();
-                    }
-                    if (mediaSource.readyState === 'open') {
-                        mediaSource.removeSourceBuffer(sourceBuffer);
-                    }
-                } catch (e) {
-                    log(`Error removing source buffer: ${e.message}`);
-                }
+            // Detach the video source to release the old MediaSource object
+            if (videoPlayer.src) {
+                URL.revokeObjectURL(videoPlayer.src);
+                videoPlayer.src = null;
             }
+            mediaSource = null;
             sourceBuffer = null;
         }
 
         function setupSourceBuffer(codec) {
-            if (!mediaSource || mediaSource.readyState !== 'open') {
-                log('Cannot setup SourceBuffer: MediaSource is not ready.');
-                return;
-            }
-            if (!MediaSource.isTypeSupported(codec)) {
-                log(`ERROR: Codec not supported by this browser: ${codec}`);
-                return;
-            }
             try {
                 log(`Creating SourceBuffer with codec: ${codec}`);
                 sourceBuffer = mediaSource.addSourceBuffer(codec);
                 sourceBuffer.addEventListener('updateend', () => {
                     isAppending = false;
-                    // After any append, immediately try to process the next chunk in the queue.
                     processNextChunk(); 
                 });
                 sourceBuffer.addEventListener('error', (e) => log(`SourceBuffer error: ${e}`));
+                // Start processing any chunks that arrived while setting up
+                processNextChunk();
             } catch (e) {
                 log(`ERROR creating SourceBuffer: ${e.message}`);
             }
@@ -211,16 +199,10 @@
                         log(`Received message: ${msg.type}`);
 
                         if (msg.type === 'fileInfo') {
+                            // This is the new, more robust flow
                             resetPlayerState();
                             fileName.textContent = `${msg.name} (${msg.transcoding ? 'Transcoded' : 'Direct Stream'})`;
-                            
-                            // If MediaSource is already open, setup buffer. Otherwise, store codec for later.
-                            if (mediaSource.readyState === 'open') {
-                                setupSourceBuffer(msg.codec);
-                            } else {
-                                log('MediaSource not open yet. Storing pending codec.');
-                                pendingCodec = msg.codec;
-                            }
+                            initializeMediaSource(msg.codec);
                         } else if (msg.type === 'error') {
                             log(`SERVER ERROR: ${msg.message}`);
                         }
