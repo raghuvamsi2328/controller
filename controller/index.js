@@ -1,11 +1,15 @@
 import WebTorrent from 'webtorrent';
 import { WebSocketServer } from 'ws';
 import ffmpeg from 'fluent-ffmpeg';
+import ffmpegInstaller from '@ffmpeg-installer/ffmpeg'; // 1. Import the installer
 import express from 'express';
 import http from 'http';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
+
+// 2. Tell fluent-ffmpeg where to find the binary
+ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
 // --- Setup ---
 const __filename = fileURLToPath(import.meta.url);
