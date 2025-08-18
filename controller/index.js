@@ -7,6 +7,7 @@ import http from 'http';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
+import os from 'os'; // <-- ADD THIS LINE
 
 // Tell fluent-ffmpeg where to find the binary
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
@@ -20,7 +21,8 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 const client = new WebTorrent();
 
-const HLS_DIR = path.join(__dirname, 'hls');
+// CHANGE THIS LINE
+const HLS_DIR = path.join(os.tmpdir(), 'webtorrent-streamer-hls');
 const PORT = 3001;
 
 // Ensure HLS directory exists and is clean
