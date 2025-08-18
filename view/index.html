@@ -117,6 +117,10 @@
 
             if (mediaSource && sourceBuffer) {
                 try {
+                    // Abort any pending appends before removing the buffer. This is the key fix.
+                    if (sourceBuffer.updating) {
+                        sourceBuffer.abort();
+                    }
                     if (mediaSource.readyState === 'open') {
                         mediaSource.removeSourceBuffer(sourceBuffer);
                     }
