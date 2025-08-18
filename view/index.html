@@ -12,7 +12,7 @@
         #magnetInput { width: calc(100% - 24px); padding: 10px; border: 1px solid #ccc; border-radius: 4px; font-family: monospace; font-size: 14px; }
         video { width: 100%; background: #000; border-radius: 5px; margin-top: 10px; }
         .controls, .actions { display: flex; justify-content: center; margin: 15px 0; gap: 10px; }
-        button { background-color: #007bff; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; font-size: 16px; transition: background-color: 0.2s; }
+        button { background-color: #007bff; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; font-size: 16px; transition: background-color 0.2s; }
         button:hover { background-color: #0056b3; }
         .status { margin-top: 15px; padding: 10px; background: #e9ecef; border-radius: 5px; font-family: monospace; font-size: 13px; line-height: 1.6; }
         .logs { height: 150px; overflow-y: auto; background: #333; color: #f8f8f8; border: 1px solid #444; padding: 10px; font-family: monospace; font-size: 12px; border-radius: 5px; white-space: pre-wrap; }
@@ -59,7 +59,6 @@
         let isAppending = false;
         let totalBytes = 0;
         let chunkCount = 0;
-        let pendingCodec = null; // Add this line
 
         function log(message) {
             const timestamp = new Date().toLocaleTimeString();
@@ -107,7 +106,6 @@
 
             mediaSource.addEventListener('sourceopen', () => {
                 log('MediaSource opened. Setting up SourceBuffer.');
-                // The 'sourceopen' event guarantees the MediaSource is ready.
                 setupSourceBuffer(codec);
             });
 
@@ -116,7 +114,20 @@
 
         function resetPlayerState() {
             log('Resetting player state for new stream...');
-            // Clear the queue of data chunks
+            
+            if (sourceBuffer) {
+                try {
+                    if (sourceBuffer.updating) {
+                        sourceBuffer.abort();
+                    }
+                    if (mediaSource && mediaSource.readyState === 'open' && mediaSource.sourceBuffers.length > 0) {
+                         mediaSource.removeSourceBuffer(sourceBuffer);
+                    }
+                } catch (e) {
+                    log(`Error during buffer cleanup: ${e.message}`);
+                }
+            }
+            
             receivedChunks = [];
             chunkCount = 0;
             totalBytes = 0;
@@ -124,7 +135,6 @@
             fileName.textContent = 'N/A';
             updateStats();
 
-            // Detach the video source to release the old MediaSource object
             if (videoPlayer.src) {
                 URL.revokeObjectURL(videoPlayer.src);
                 videoPlayer.src = null;
@@ -142,7 +152,6 @@
                     processNextChunk(); 
                 });
                 sourceBuffer.addEventListener('error', (e) => log(`SourceBuffer error: ${e}`));
-                // Start processing any chunks that arrived while setting up
                 processNextChunk();
             } catch (e) {
                 log(`ERROR creating SourceBuffer: ${e.message}`);
@@ -150,7 +159,6 @@
         }
 
         function processNextChunk() {
-            // Only proceed if we have chunks and the buffer isn't busy.
             if (sourceBuffer && !sourceBuffer.updating && receivedChunks.length > 0) {
                 isAppending = true;
                 const chunk = receivedChunks.shift();
@@ -158,7 +166,7 @@
                     sourceBuffer.appendBuffer(chunk);
                 } catch (error) {
                     log(`ERROR appending chunk: ${error.message}`);
-                    isAppending = false; // Reset flag on error
+                    isAppending = false;
                 }
             }
         }
@@ -199,7 +207,6 @@
                         log(`Received message: ${msg.type}`);
 
                         if (msg.type === 'fileInfo') {
-                            // This is the new, more robust flow
                             resetPlayerState();
                             fileName.textContent = `${msg.name} (${msg.transcoding ? 'Transcoded' : 'Direct Stream'})`;
                             initializeMediaSource(msg.codec);
@@ -227,8 +234,8 @@
             };
         }
 
-        // Start the application
-        initializeMediaSource();
+        // Start the application by connecting the WebSocket.
+        // Do NOT initialize MediaSource here.
         connectWebSocket();
     </script>
 </body>
