@@ -1,4 +1,3 @@
-
 import WebTorrent from 'webtorrent';
 import { WebSocketServer } from 'ws';
 import ffmpeg from 'fluent-ffmpeg';
@@ -255,19 +254,15 @@ function createTranscodingStream(inputStream, filename) {
   const outputStream = new PassThrough();
   
   const ffmpegCommand = ffmpeg(inputStream)
-    .inputFormat('mp4') // Try MP4 first, FFmpeg will auto-detect if needed
+    // Let FFmpeg auto-detect the input format from the stream
     .videoCodec('libx264') // Convert to H.264
     .audioCodec('aac') // Convert audio to AAC
-    .format('mp4')
+    .format('mp4') // Output format
     .addOptions([
       '-preset ultrafast', // Fastest encoding for real-time
-      '-tune zerolatency', // Optimize for streaming
-      '-crf 28', // Good quality balance for streaming
-      '-maxrate 2M', // Limit bitrate for smoother streaming
-      '-bufsize 4M', // Buffer size
-      '-movflags frag_keyframe+empty_moov+default_base_moof', // Enable progressive streaming with proper fragmentation
-      '-frag_duration 1000000', // 1 second fragments
-      '-f mp4' // Force MP4 format
+      '-tune zerolatency', // Optimize for low-latency streaming
+      '-movflags frag_keyframe+empty_moov', // This is the crucial part for MediaSource
+      '-f mp4' // Explicitly set the container format
     ]);
   
   // Handle transcoding progress

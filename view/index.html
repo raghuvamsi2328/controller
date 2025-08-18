@@ -141,7 +141,8 @@
                 sourceBuffer = mediaSource.addSourceBuffer(codec);
                 sourceBuffer.addEventListener('updateend', () => {
                     isAppending = false;
-                    processNextChunk(); // Try to append next chunk after the previous one is done
+                    // After any append, immediately try to process the next chunk in the queue.
+                    processNextChunk(); 
                 });
                 sourceBuffer.addEventListener('error', (e) => log(`SourceBuffer error: ${e}`));
             } catch (e) {
@@ -150,7 +151,8 @@
         }
 
         function processNextChunk() {
-            if (receivedChunks.length > 0 && sourceBuffer && !sourceBuffer.updating && !isAppending) {
+            // Only proceed if we have chunks and the buffer isn't busy.
+            if (sourceBuffer && !sourceBuffer.updating && receivedChunks.length > 0) {
                 isAppending = true;
                 const chunk = receivedChunks.shift();
                 try {
