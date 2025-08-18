@@ -34,6 +34,9 @@ fs.mkdirSync(HLS_DIR);
 // Serve the HLS files
 app.use('/hls', express.static(HLS_DIR));
 
+// --- ADD THIS LINE TO SERVE YOUR HTML, CSS, and JS from the 'view' folder ---
+app.use(express.static(path.join(__dirname, '..', 'view')));
+
 // --- State ---
 let ffmpegProcess = null;
 const defaultMagnetLink = 'magnet:?xt=urn:btih:dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c'; // Big Buck Bunny

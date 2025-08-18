@@ -62,22 +62,25 @@
         }
 
         function initializePlayer(streamUrl) {
-            log(`Initializing player for URL: ${streamUrl}`);
+            // THE FIX: Construct the full URL to ensure the correct port is always used.
+            const fullUrl = `http://${window.location.hostname}:3001${streamUrl}`;
+            log(`Initializing player for URL: ${fullUrl}`);
+            
             if (hls) {
-                hls.destroy(); // Clean up previous instance before creating a new one
+                hls.destroy(); // Clean up previous instance
             }
 
             // Check if the browser supports HLS natively (like Safari)
             if (videoPlayer.canPlayType('application/vnd.apple.mpegurl')) {
                 log('Browser supports HLS natively.');
-                videoPlayer.src = streamUrl;
+                videoPlayer.src = fullUrl; // Use the full URL
                 videoPlayer.addEventListener('loadedmetadata', () => {
                     videoPlayer.play();
                 });
             } else if (Hls.isSupported()) {
                 log('Using hls.js to play stream.');
                 hls = new Hls();
-                hls.loadSource(streamUrl);
+                hls.loadSource(fullUrl); // Use the full URL
                 hls.attachMedia(videoPlayer);
                 hls.on(Hls.Events.MANIFEST_PARSED, () => {
                     log('Manifest parsed, starting playback.');
