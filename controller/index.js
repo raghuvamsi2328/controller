@@ -183,3 +183,14 @@ server.listen(PORT, () => {
     console.log(`🚀 Server running at http://localhost:${PORT}`);
     console.log('🎬 Waiting for client to provide a magnet link...');
 });
+
+// --- Global Error Handler ---
+// This is a critical addition. It will catch any unhandled errors that would
+// otherwise crash the server, log them, and allow the server to keep running.
+process.on('uncaughtException', (err, origin) => {
+    console.error('🔥🔥🔥 UNCAUGHT EXCEPTION! SERVER WILL NOT CRASH 🔥🔥🔥');
+    console.error(`Caught exception: ${err}\n` + `Exception origin: ${origin}`);
+    console.error(err.stack); // Log the full stack trace
+    // Optionally, notify clients that a fatal error occurred
+    broadcast({ type: 'error', message: 'A fatal server error occurred. Please try again.' });
+});
