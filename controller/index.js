@@ -1,14 +1,14 @@
 import WebTorrent from 'webtorrent';
 import { WebSocketServer } from 'ws';
 import ffmpeg from 'fluent-ffmpeg';
-import ffmpegInstaller from '@ffmpeg-installer/ffmpeg'; // 1. Import the installer
+import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
 import express from 'express';
 import http from 'http';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 
-// 2. Tell fluent-ffmpeg where to find the binary
+// Tell fluent-ffmpeg where to find the binary
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
 // --- Setup ---
@@ -39,24 +39,40 @@ const defaultMagnetLink = 'magnet:?xt=urn:btih:dd8255ecdc7ca55fb0bbf81323d87062d
 // --- Functions ---
 function clearPreviousStream() {
     console.log('🗑️ Clearing previous stream...');
-    // Stop any running ffmpeg process
     if (ffmpegProcess) {
         ffmpegProcess.kill('SIGKILL');
         ffmpegProcess = null;
         console.log('🔪 Killed previous FFmpeg process.');
     }
-
-    // Remove all torrents
     client.torrents.forEach(torrent => {
         console.log('Removing torrent:', torrent.name || 'Unknown');
         client.remove(torrent, { destroyStore: true });
     });
-
-    // Clean HLS directory
     fs.readdirSync(HLS_DIR).forEach(file => {
         fs.unlinkSync(path.join(HLS_DIR, file));
     });
     console.log('🧹 Cleaned HLS directory.');
+}
+
+function waitForPlaylist(playlistPath, callback, timeout = 30000) {
+    console.log('⏳ Waiting for playlist to be created...');
+    const interval = 200;
+    let elapsedTime = 0;
+    const check = setInterval(() => {
+        if (fs.existsSync(playlistPath)) {
+            clearInterval(check);
+            console.log('✅ Playlist found! Notifying client.');
+            callback(null);
+        } else {
+            elapsedTime += interval;
+            if (elapsedTime >= timeout) {
+                clearInterval(check);
+                const timeoutError = new Error('Timed out waiting for playlist file.');
+                console.error(`❌ ${timeoutError.message}`);
+                callback(timeoutError);
+            }
+        }
+    }, interval);
 }
 
 function startStream(magnetLink) {
@@ -64,6 +80,11 @@ function startStream(magnetLink) {
     console.log('Starting torrent for:', magnetLink);
 
     const torrent = client.add(magnetLink, { destroyStoreOnDestroy: true });
+
+    torrent.on('error', (err) => {
+        console.error('❌ Top-level torrent error:', err.message);
+        broadcast({ type: 'error', message: 'Invalid magnet link or torrent error.' });
+    });
 
     torrent.on('ready', () => {
         console.log('✅ Torrent ready:', torrent.name);
@@ -81,37 +102,50 @@ function startStream(magnetLink) {
         const sourceStream = videoFile.createReadStream();
         const playlistPath = path.join(HLS_DIR, 'playlist.m3u8');
 
+        // **CRITICAL FIX**: This error handler prevents a stream read error from crashing the server.
+        sourceStream.on('error', (err) => {
+            console.error('❌ Torrent stream read error:', err.message);
+            broadcast({ type: 'error', message: 'Failed to read from torrent stream.' });
+            if (ffmpegProcess) {
+                ffmpegProcess.kill('SIGKILL');
+            }
+        });
+
         ffmpegProcess = ffmpeg(sourceStream)
             .videoCodec('libx264')
             .audioCodec('aac')
             .addOptions([
-                '-hls_time 10',          // 10-second segments
-                '-hls_list_size 6',      // Keep 6 segments in the playlist
-                '-hls_flags delete_segments', // Delete old segments
+                '-hls_time 10',
+                '-hls_list_size 6',
+                '-hls_flags delete_segments',
                 '-preset ultrafast',
                 '-tune zerolatency'
             ])
             .on('start', (commandLine) => {
-                console.log('🚀 FFmpeg started:', commandLine);
-                // Give FFmpeg a moment to create the first files
-                setTimeout(() => {
+                console.log('🚀 FFmpeg started.');
+                waitForPlaylist(playlistPath, (err) => {
+                    if (err) {
+                        broadcast({ type: 'error', message: 'Stream failed to start in time.' });
+                        return;
+                    }
                     broadcast({ 
                         type: 'streamReady', 
                         url: '/hls/playlist.m3u8' 
                     });
-                }, 5000);
+                });
             })
-            .on('error', (err) => {
-                console.error('❌ FFmpeg error:', err.message);
-                broadcast({ type: 'error', message: 'Failed to transcode video.' });
+            .on('error', (err, stdout, stderr) => {
+                // This catches FFmpeg-specific errors (e.g., invalid data)
+                if (!err.message.includes('SIGKILL')) { // Don't log errors from us killing the process
+                    console.error('❌ FFmpeg process error:', err.message);
+                    broadcast({ type: 'error', message: 'Failed to transcode video.' });
+                }
             })
             .on('end', () => {
                 console.log('✅ FFmpeg processing finished.');
             })
             .save(playlistPath);
     });
-
-    torrent.on('error', err => console.error('Torrent error:', err));
 }
 
 // --- WebSocket Logic ---
