@@ -3,7 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>WebSocket Video Streamer</title>
+    <title>HLS Video Streamer</title>
+    <!-- Include hls.js library from a CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 20px; background-color: #f4f4f9; color: #333; }
         .container { max-width: 800px; margin: auto; background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
@@ -11,17 +13,15 @@
         .input-section { margin-bottom: 20px; padding: 15px; background: #f8f9fa; border: 1px solid #ddd; border-radius: 5px; }
         #magnetInput { width: calc(100% - 24px); padding: 10px; border: 1px solid #ccc; border-radius: 4px; font-family: monospace; font-size: 14px; }
         video { width: 100%; background: #000; border-radius: 5px; margin-top: 10px; }
-        .controls, .actions { display: flex; justify-content: center; margin: 15px 0; gap: 10px; }
-        button { background-color: #007bff; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; font-size: 16px; transition: background-color 0.2s; }
+        .actions { display: flex; justify-content: center; margin: 15px 0; gap: 10px; }
+        button { background-color: #007bff; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; font-size: 16px; transition: background-color: 0.2s; }
         button:hover { background-color: #0056b3; }
-        .status { margin-top: 15px; padding: 10px; background: #e9ecef; border-radius: 5px; font-family: monospace; font-size: 13px; line-height: 1.6; }
         .logs { height: 150px; overflow-y: auto; background: #333; color: #f8f8f8; border: 1px solid #444; padding: 10px; font-family: monospace; font-size: 12px; border-radius: 5px; white-space: pre-wrap; }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>WebSocket Video Streamer</h1>
-        
+        <h1>HLS Video Streamer</h1>
         <div class="input-section">
             <input type="text" id="magnetInput" placeholder="Enter magnet link or info hash">
             <div class="actions">
@@ -29,36 +29,15 @@
                 <button onclick="startDefault()">Play Default</button>
             </div>
         </div>
-        
         <video id="videoPlayer" controls autoplay muted></video>
-        
-        <div class="status">
-            <div><strong>Connection:</strong> <span id="connectionStatus">Connecting...</span></div>
-            <div><strong>File:</strong> <span id="fileName">N/A</span></div>
-            <div><strong>Chunks:</strong> <span id="chunkCount">0</span> | <strong>Received:</strong> <span id="totalBytes">0 B</span></div>
-        </div>
-        
         <div class="logs" id="logs"></div>
     </div>
 
     <script>
-        // DOM Elements
         const videoPlayer = document.getElementById('videoPlayer');
         const magnetInput = document.getElementById('magnetInput');
-        const connectionStatus = document.getElementById('connectionStatus');
-        const fileName = document.getElementById('fileName');
-        const chunkCountEl = document.getElementById('chunkCount');
-        const totalBytesEl = document.getElementById('totalBytes');
         const logs = document.getElementById('logs');
-
-        // State variables
-        let ws = null;
-        let mediaSource = null;
-        let sourceBuffer = null;
-        let receivedChunks = [];
-        let isAppending = false;
-        let totalBytes = 0;
-        let chunkCount = 0;
+        let hls = null;
 
         function log(message) {
             const timestamp = new Date().toLocaleTimeString();
@@ -73,170 +52,56 @@
                 log('ERROR: Please enter a magnet link or hash.');
                 return;
             }
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                log(`Requesting stream for: ${magnetLink.substring(0, 50)}...`);
-                ws.send(JSON.stringify({ type: 'setMagnetLink', magnetLink }));
-            } else {
-                log('ERROR: WebSocket is not connected.');
-            }
+            log(`Requesting stream for: ${magnetLink.substring(0, 50)}...`);
+            ws.send(JSON.stringify({ type: 'setMagnetLink', magnetLink }));
         }
 
         function startDefault() {
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                log('Requesting default stream (Big Buck Bunny)...');
-                ws.send(JSON.stringify({ type: 'startDefault' }));
-            } else {
-                log('ERROR: WebSocket is not connected.');
-            }
+            log('Requesting default stream...');
+            ws.send(JSON.stringify({ type: 'startDefault' }));
         }
 
-        magnetInput.addEventListener('keypress', (e) => {
-            if (e.key === 'Enter') startStream();
-        });
-
-        function initializeMediaSource(codec) {
-            log('Initializing new MediaSource...');
-            if (!MediaSource.isTypeSupported(codec)) {
-                log(`FATAL: Codec not supported by browser: ${codec}`);
-                return;
+        function initializePlayer(streamUrl) {
+            log(`Initializing player for URL: ${streamUrl}`);
+            if (hls) {
+                hls.destroy(); // Clean up previous instance
             }
-
-            mediaSource = new MediaSource();
-            videoPlayer.src = URL.createObjectURL(mediaSource);
-
-            mediaSource.addEventListener('sourceopen', () => {
-                log('MediaSource opened. Setting up SourceBuffer.');
-                setupSourceBuffer(codec);
+            hls = new Hls();
+            hls.loadSource(streamUrl);
+            hls.attachMedia(videoPlayer);
+            hls.on(Hls.Events.MANIFEST_PARSED, () => {
+                log('Manifest parsed, starting playback.');
+                videoPlayer.play();
             });
-
-            mediaSource.addEventListener('error', (e) => log('MediaSource error:', e));
-        }
-
-        function resetPlayerState() {
-            log('Resetting player state for new stream...');
-            
-            if (sourceBuffer) {
-                try {
-                    if (sourceBuffer.updating) {
-                        sourceBuffer.abort();
-                    }
-                    if (mediaSource && mediaSource.readyState === 'open' && mediaSource.sourceBuffers.length > 0) {
-                         mediaSource.removeSourceBuffer(sourceBuffer);
-                    }
-                } catch (e) {
-                    log(`Error during buffer cleanup: ${e.message}`);
+            hls.on(Hls.Events.ERROR, (event, data) => {
+                if (data.fatal) {
+                    log(`HLS FATAL ERROR: ${data.type} - ${data.details}`);
+                    console.error('HLS Error:', data);
                 }
-            }
-            
-            receivedChunks = [];
-            chunkCount = 0;
-            totalBytes = 0;
-            isAppending = false;
-            fileName.textContent = 'N/A';
-            updateStats();
-
-            if (videoPlayer.src) {
-                URL.revokeObjectURL(videoPlayer.src);
-                videoPlayer.src = null;
-            }
-            mediaSource = null;
-            sourceBuffer = null;
+            });
         }
 
-        function setupSourceBuffer(codec) {
+        // --- WebSocket Connection ---
+        const ws = new WebSocket(`ws://${window.location.hostname}:3001`);
+
+        ws.onopen = () => log('WebSocket connection established.');
+        ws.onclose = () => log('WebSocket connection closed.');
+        ws.onerror = (err) => log('WebSocket error. See console.');
+
+        ws.onmessage = (event) => {
             try {
-                log(`Creating SourceBuffer with codec: ${codec}`);
-                sourceBuffer = mediaSource.addSourceBuffer(codec);
-                sourceBuffer.addEventListener('updateend', () => {
-                    isAppending = false;
-                    processNextChunk(); 
-                });
-                sourceBuffer.addEventListener('error', (e) => log(`SourceBuffer error: ${e}`));
-                processNextChunk();
+                const msg = JSON.parse(event.data);
+                log(`Received message: ${msg.type}`);
+
+                if (msg.type === 'streamReady' && msg.url) {
+                    initializePlayer(msg.url);
+                } else if (msg.type === 'error') {
+                    log(`SERVER ERROR: ${msg.message}`);
+                }
             } catch (e) {
-                log(`ERROR creating SourceBuffer: ${e.message}`);
+                log('Error parsing server message.');
             }
-        }
-
-        function processNextChunk() {
-            if (sourceBuffer && !sourceBuffer.updating && receivedChunks.length > 0) {
-                isAppending = true;
-                const chunk = receivedChunks.shift();
-                try {
-                    sourceBuffer.appendBuffer(chunk);
-                } catch (error) {
-                    log(`ERROR appending chunk: ${error.message}`);
-                    isAppending = false;
-                }
-            }
-        }
-
-        function updateStats() {
-            chunkCountEl.textContent = chunkCount;
-            const k = 1024;
-            const sizes = ['B', 'KB', 'MB', 'GB'];
-            if (totalBytes === 0) {
-                totalBytesEl.textContent = '0 B';
-                return;
-            }
-            const i = Math.floor(Math.log(totalBytes) / Math.log(k));
-            totalBytesEl.textContent = `${parseFloat((totalBytes / Math.pow(k, i)).toFixed(2))} ${sizes[i]}`;
-        }
-
-        function connectWebSocket() {
-            log('Connecting to WebSocket at ws://localhost:3001...');
-            ws = new WebSocket('ws://localhost:3001');
-            ws.binaryType = 'arraybuffer';
-
-            ws.onopen = () => {
-                log('WebSocket connection established.');
-                connectionStatus.textContent = 'Connected';
-                connectionStatus.style.color = 'green';
-            };
-
-            ws.onmessage = (event) => {
-                if (event.data instanceof ArrayBuffer) {
-                    chunkCount++;
-                    totalBytes += event.data.byteLength;
-                    receivedChunks.push(new Uint8Array(event.data));
-                    updateStats();
-                    processNextChunk();
-                } else {
-                    try {
-                        const msg = JSON.parse(event.data);
-                        log(`Received message: ${msg.type}`);
-
-                        if (msg.type === 'fileInfo') {
-                            resetPlayerState();
-                            fileName.textContent = `${msg.name} (${msg.transcoding ? 'Transcoded' : 'Direct Stream'})`;
-                            initializeMediaSource(msg.codec);
-                        } else if (msg.type === 'error') {
-                            log(`SERVER ERROR: ${msg.message}`);
-                        }
-                    } catch (e) {
-                        log(`Error parsing JSON message: ${e.message}`);
-                    }
-                }
-            };
-
-            ws.onerror = (error) => {
-                log('WebSocket error. See console for details.');
-                console.error('WebSocket Error:', error);
-                connectionStatus.textContent = 'Error';
-                connectionStatus.style.color = 'red';
-            };
-
-            ws.onclose = () => {
-                log('WebSocket closed. Attempting to reconnect in 3 seconds...');
-                connectionStatus.textContent = 'Reconnecting...';
-                connectionStatus.style.color = 'orange';
-                setTimeout(connectWebSocket, 3000);
-            };
-        }
-
-        // Start the application by connecting the WebSocket.
-        // Do NOT initialize MediaSource here.
-        connectWebSocket();
+        };
     </script>
 </body>
 </html>
