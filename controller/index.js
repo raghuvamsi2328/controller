@@ -79,9 +79,10 @@ app.get('/stream', (req, res) => {
         return res.status(404).send('File not found in torrent.');
     }
 
-    // This endpoint supports seeking (HTTP Range Requests)
     const fileSize = file.length;
     const rangeHeader = req.headers.range;
+
+    let stream;
 
     if (rangeHeader) {
         const ranges = rangeParser(fileSize, rangeHeader);
@@ -100,16 +101,39 @@ app.get('/stream', (req, res) => {
         res.setHeader('Accept-Ranges', 'bytes');
         res.setHeader('Content-Type', 'video/mp4');
 
-        const stream = file.createReadStream({ start, end });
-        stream.pipe(res);
+        stream = file.createReadStream({ start, end });
     } else {
-        // No range requested, send the whole file
         res.status(200);
         res.setHeader('Content-Length', fileSize);
         res.setHeader('Content-Type', 'video/mp4');
-        const stream = file.createReadStream();
-        stream.pipe(res);
+        stream = file.createReadStream();
     }
+
+    // ** THE FIX IS HERE **
+    // Add listeners to gracefully handle stream lifecycle events.
+
+    // When the client closes the connection (e.g., closes the tab), destroy the torrent stream.
+    res.on('close', () => {
+        if (!stream.destroyed) {
+            console.log('Client closed connection, destroying stream.');
+            stream.destroy();
+        }
+    });
+
+    // When the stream has an error (e.g., the torrent was destroyed by a new request),
+    // log it and end the response. This prevents the 'afterdestroy' crash.
+    stream.on('error', (err) => {
+        console.error('Stream error:', err.message);
+        // We can't send headers anymore, just end the connection.
+        if (!res.headersSent) {
+            res.status(500).send('Stream error');
+        } else {
+            res.end();
+        }
+    });
+
+    // Pipe the data to the response.
+    stream.pipe(res);
 });
 
 
