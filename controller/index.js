@@ -6,7 +6,12 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import rangeParser from 'range-parser';
 import cors from 'cors';
-import crypto from 'crypto'; // <-- ADD THIS LINE
+import crypto from 'crypto';
+
+// Simple UUID generator that works in all Node.js versions
+function generateSessionId() {
+    return 'session_' + Math.random().toString(36).substr(2, 9) + '_' + Date.now().toString(36);
+}
 
 // --- Setup ---
 const __filename = fileURLToPath(import.meta.url);
@@ -37,46 +42,105 @@ const defaultMagnetLink = 'magnet:?xt=urn:btih:dd8255ecdc7ca55fb0bbf81323d87062d
 // function clearPreviousStream() { ... }
 
 function startStream(magnetLink, ws) {
-    // If this WebSocket connection already has a stream, destroy it before creating a new one.
-    if (ws.sessionId) {
-        const oldTorrent = activeTorrents.get(ws.sessionId);
-        if (oldTorrent) {
-            console.log(`🗑️ Clearing previous stream for session: ${ws.sessionId}`);
-            client.remove(oldTorrent, { destroyStore: true });
-            activeTorrents.delete(ws.sessionId);
+    try {
+        console.log(`🔍 [DEBUG] startStream called with magnet: ${magnetLink.substring(0, 80)}...`);
+        
+        // If this WebSocket connection already has a stream, destroy it before creating a new one.
+        if (ws.sessionId) {
+            const oldTorrent = activeTorrents.get(ws.sessionId);
+            if (oldTorrent) {
+                console.log(`🗑️ Clearing previous stream for session: ${ws.sessionId}`);
+                client.remove(oldTorrent, { destroyStore: true });
+                activeTorrents.delete(ws.sessionId);
+            }
         }
-    }
 
-    const sessionId = crypto.randomUUID(); // Generate a unique ID for this stream session.
-    ws.sessionId = sessionId; // Associate the session ID with the WebSocket connection.
+        const sessionId = generateSessionId();
+        ws.sessionId = sessionId;
+        console.log(`🔍 [DEBUG] Generated session ID: ${sessionId}`);
 
-    console.log(`🚀 [${sessionId}] Starting torrent for:`, magnetLink);
-    const torrent = client.add(magnetLink, { destroyStoreOnDestroy: true });
-    activeTorrents.set(sessionId, torrent); // Add the new torrent to our collection.
-
-    torrent.on('ready', () => {
-        const videoFile = torrent.files.find(file => 
-            file.name.endsWith('.mp4') || file.name.endsWith('.mkv')
-        );
-
-        if (!videoFile) {
-            ws.send(JSON.stringify({ type: 'error', message: 'No video file found.' }));
+        console.log(`🚀 [${sessionId}] Starting torrent for:`, magnetLink);
+        
+        // Add error handling for the torrent creation itself
+        let torrent;
+        try {
+            console.log(`🔍 [DEBUG] About to call client.add...`);
+            torrent = client.add(magnetLink, { 
+                destroyStoreOnDestroy: true,
+                // Add these options to make it more robust in Docker
+                downloadLimit: -1,
+                uploadLimit: -1,
+                maxConns: 55,
+                tracker: { announce: [] }
+            });
+            console.log(`🔍 [DEBUG] client.add completed successfully`);
+        } catch (addError) {
+            console.error(`❌ [${sessionId}] Failed to add torrent:`, addError.message);
+            ws.send(JSON.stringify({ type: 'error', message: 'Failed to add torrent. Invalid magnet link.' }));
             return;
         }
-        
-        console.log(`✅ [${sessionId}] File ready: ${videoFile.name}`);
-        // The URL now includes the unique sessionId.
-        ws.send(JSON.stringify({
-            type: 'streamReady',
-            url: `/stream/${sessionId}?filename=${encodeURIComponent(videoFile.name)}`
-        }));
-    });
 
-    torrent.on('error', (err) => {
-        console.error(`❌ [${sessionId}] Torrent error:`, err.message);
-        ws.send(JSON.stringify({ type: 'error', message: 'Invalid magnet link or torrent error.' }));
-        activeTorrents.delete(sessionId); // Clean up on error.
-    });
+        activeTorrents.set(sessionId, torrent);
+        console.log(`🔍 [DEBUG] Torrent added to activeTorrents map`);
+
+        // Set a timeout to detect if the torrent never becomes ready
+        const readyTimeout = setTimeout(() => {
+            console.error(`❌ [${sessionId}] Torrent ready timeout after 30 seconds`);
+            ws.send(JSON.stringify({ type: 'error', message: 'Torrent took too long to become ready. Try a different magnet link.' }));
+            client.remove(torrent, { destroyStore: true });
+            activeTorrents.delete(sessionId);
+        }, 30000);
+
+        torrent.on('ready', () => {
+            try {
+                clearTimeout(readyTimeout);
+                console.log(`✅ [${sessionId}] Torrent ready: ${torrent.name}`);
+                console.log(`🔍 [DEBUG] Torrent has ${torrent.files.length} files`);
+                
+                const videoFile = torrent.files.find(file => {
+                    const name = file.name.toLowerCase();
+                    return name.endsWith('.mp4') || name.endsWith('.mkv') || name.endsWith('.avi');
+                });
+
+                if (!videoFile) {
+                    console.log(`❌ [${sessionId}] No video file found in torrent`);
+                    console.log(`🔍 [DEBUG] Available files:`, torrent.files.map(f => f.name));
+                    ws.send(JSON.stringify({ type: 'error', message: 'No video file found.' }));
+                    return;
+                }
+                
+                console.log(`✅ [${sessionId}] File ready: ${videoFile.name}`);
+                ws.send(JSON.stringify({
+                    type: 'streamReady',
+                    url: `/stream/${sessionId}?filename=${encodeURIComponent(videoFile.name)}`
+                }));
+            } catch (readyError) {
+                console.error(`❌ [${sessionId}] Error in ready handler:`, readyError.message);
+                ws.send(JSON.stringify({ type: 'error', message: 'Error processing torrent files.' }));
+            }
+        });
+
+        torrent.on('error', (err) => {
+            clearTimeout(readyTimeout);
+            console.error(`❌ [${sessionId}] Torrent error:`, err.message);
+            ws.send(JSON.stringify({ type: 'error', message: 'Invalid magnet link or torrent error.' }));
+            activeTorrents.delete(sessionId);
+        });
+
+        // Add more event listeners for debugging
+        torrent.on('download', () => {
+            console.log(`🔍 [${sessionId}] Download progress: ${(torrent.progress * 100).toFixed(1)}%`);
+        });
+
+        torrent.on('wire', (wire) => {
+            console.log(`🔍 [${sessionId}] Connected to peer`);
+        });
+
+    } catch (error) {
+        console.error('❌ Critical error in startStream:', error.message);
+        console.error('Stack trace:', error.stack);
+        ws.send(JSON.stringify({ type: 'error', message: 'Server error occurred.' }));
+    }
 }
 
 // --- HTTP Streaming Endpoint ---
