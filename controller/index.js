@@ -31,22 +31,51 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
-// --- Better Rate Limiting ---
-// Separate rate limits for different endpoints
-const apiLimiter = rateLimit({
+// --- Smarter Rate Limiting ---
+// Different limits for different types of operations
+
+// General API browsing (health, list streams)
+const generalApiLimiter = rateLimit({
     windowMs: 1 * 60 * 1000, // 1 minute
-    max: 30, // 30 requests per minute per IP
+    max: 100, // Increased for general API calls
     message: { error: 'API rate limit exceeded. Please slow down.' },
     standardHeaders: true,
     legacyHeaders: false,
 });
 
+// Stream creation (most expensive operation)
 const streamCreateLimiter = rateLimit({
     windowMs: 5 * 60 * 1000, // 5 minutes
     max: 5, // Only 5 stream creations per 5 minutes per IP
     message: { error: 'Stream creation limit exceeded. Please wait before creating more streams.' },
     standardHeaders: true,
     legacyHeaders: false,
+});
+
+// Stream status polling (frequent but lightweight)
+const streamStatusLimiter = rateLimit({
+    windowMs: 1 * 60 * 1000, // 1 minute
+    max: 60, // 60 status checks per minute (1 per second average)
+    message: { error: 'Status polling too frequent. Please reduce polling rate.' },
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req) => {
+        // Allow higher limits for status checks of own streams
+        return `status-${req.ip}-${req.params.streamId || 'general'}`;
+    }
+});
+
+// Video streaming (should be unlimited for smooth playback)
+const streamingLimiter = rateLimit({
+    windowMs: 1 * 60 * 1000, // 1 minute
+    max: 1000, // Very high limit for video chunk requests
+    message: { error: 'Streaming rate limit exceeded.' },
+    standardHeaders: false, // Don't add headers to video responses
+    legacyHeaders: false,
+    skip: (req) => {
+        // Skip rate limiting for range requests (video chunks)
+        return req.headers.range !== undefined;
+    }
 });
 
 // --- Security & Middleware ---
@@ -60,12 +89,12 @@ app.use(cors({
 }));
 
 // Apply rate limiting
-app.use('/api/health', apiLimiter);
+app.use('/api/health', generalApiLimiter);
 app.use('/api/streams', (req, res, next) => {
     if (req.method === 'POST') {
         streamCreateLimiter(req, res, next);
     } else {
-        apiLimiter(req, res, next);
+        generalApiLimiter(req, res, next);
     }
 });
 
@@ -547,17 +576,15 @@ wss.on('connection', (ws, req) => {
     ws.on('message', (message) => {
         try {
             const data = JSON.parse(message);
+            console.log(`📨 WebSocket message from ${clientId}:`, data.type);
             
             switch (data.type) {
                 case 'create_stream':
-                    if (data.magnetLink) {
-                        const stream = streamManager.createStream(data.magnetLink, clientId);
-                        ws.send(JSON.stringify({
-                            type: 'stream_created',
-                            streamId: stream.id,
-                            timestamp: Date.now()
-                        }));
-                    }
+                    handleCreateStreamWS(data, ws, clientId);
+                    break;
+                    
+                case 'destroy_stream':
+                    handleDestroyStreamWS(data, ws, clientId);
                     break;
                     
                 case 'ping':
@@ -566,9 +593,16 @@ wss.on('connection', (ws, req) => {
                         timestamp: Date.now()
                     }));
                     break;
+                    
+                default:
+                    console.log(`❓ Unknown WebSocket message type: ${data.type}`);
             }
         } catch (e) {
             console.error('Invalid WebSocket message:', e.message);
+            ws.send(JSON.stringify({
+                type: 'error',
+                message: 'Invalid message format'
+            }));
         }
     });
 
@@ -584,6 +618,82 @@ wss.on('connection', (ws, req) => {
         console.error('WebSocket error:', err.message);
     });
 });
+
+// WebSocket message handlers
+function handleCreateStreamWS(data, ws, clientId) {
+    try {
+        const { magnetLink } = data;
+        
+        if (!magnetLink) {
+            ws.send(JSON.stringify({
+                type: 'error',
+                message: 'magnetLink is required'
+            }));
+            return;
+        }
+
+        console.log(`🚀 Creating stream via WebSocket for client ${clientId}`);
+        
+        // Use the same logic as REST API
+        const stream = streamManager.createStream(magnetLink, clientId);
+        
+        // Send success response
+        ws.send(JSON.stringify({
+            type: 'stream_created',
+            streamId: stream.id,
+            status: stream.status,
+            timestamp: Date.now()
+        }));
+        
+        console.log(`✅ Stream ${stream.id} created via WebSocket`);
+        
+    } catch (error) {
+        console.error('WebSocket stream creation error:', error.message);
+        ws.send(JSON.stringify({
+            type: 'error',
+            message: error.message
+        }));
+    }
+}
+
+function handleDestroyStreamWS(data, ws, clientId) {
+    try {
+        const { streamId } = data;
+        
+        if (!streamId) {
+            ws.send(JSON.stringify({
+                type: 'error',
+                message: 'streamId is required'
+            }));
+            return;
+        }
+
+        console.log(`🗑️ Destroying stream ${streamId} via WebSocket`);
+        
+        const destroyed = streamManager.destroyStream(streamId, 'websocket_request');
+        
+        if (destroyed) {
+            ws.send(JSON.stringify({
+                type: 'stream_destroyed',
+                streamId: streamId,
+                timestamp: Date.now()
+            }));
+            console.log(`✅ Stream ${streamId} destroyed via WebSocket`);
+        } else {
+            ws.send(JSON.stringify({
+                type: 'error',
+                message: 'Stream not found or could not be destroyed'
+            }));
+        }
+        
+    } catch (error) {
+        console.error('WebSocket stream destruction error:', error.message);
+        ws.send(JSON.stringify({
+            type: 'error',
+            message: error.message
+        }));
+    }
+}
 
 // --- Error Handling ---
 app.use((err, req, res, next) => {

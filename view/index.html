@@ -188,6 +188,7 @@
         let clientId = null;
         let currentStreamId = null;
         let currentStream = null;
+        let pollTimeoutId = null; // Track polling timeout to cancel it
 
         // DOM elements
         const videoPlayer = document.getElementById('videoPlayer');
@@ -222,7 +223,7 @@
             }
         }
 
-        // API Functions
+        // API Functions (only for specific calls, not polling)
         async function apiCall(endpoint, options = {}) {
             try {
                 const response = await fetch(`/api${endpoint}`, {
@@ -272,16 +273,16 @@
             }
         }
 
-        // Stream management
-        async function createStream() {
+        // Stream management via WebSocket
+        function createStream() {
             const magnetLink = magnetInput.value.trim();
             if (!magnetLink) {
                 log('Please enter a magnet link', 'error');
                 return;
             }
 
-            if (!clientId) {
-                log('Client ID not available. Please wait for connection.', 'error');
+            if (!clientId || !isConnected) {
+                log('Not connected to server. Please wait.', 'error');
                 return;
             }
 
@@ -291,31 +292,17 @@
                 
                 log(`Creating stream for magnet: ${magnetLink.substring(0, 50)}...`);
                 
-                const result = await apiCall('/streams', {
-                    method: 'POST',
-                    body: JSON.stringify({
-                        magnetLink: magnetLink,
-                        clientId: clientId
-                    })
-                });
+                // Send stream creation request via WebSocket
+                ws.send(JSON.stringify({
+                    type: 'create_stream',
+                    magnetLink: magnetLink,
+                    clientId: clientId
+                }));
 
-                currentStreamId = result.streamId;
-                log(`Stream created with ID: ${currentStreamId}`, 'success');
-                
-                // Start polling for stream status
-                pollStreamStatus();
-                
                 createStreamBtn.disabled = true;
-                destroyStreamBtn.disabled = false;
-                
-                updateStreamInfo({
-                    id: currentStreamId,
-                    status: 'initializing',
-                    metadata: {}
-                });
                 
             } catch (error) {
-                log(`Failed to create stream: ${error.message}`, 'error');
+                log(`Failed to send stream creation request: ${error.message}`, 'error');
                 updateStatus(true, 'Connected to server');
             }
         }
@@ -327,11 +314,24 @@
             }
 
             try {
+                // Cancel any ongoing polling
+                if (pollTimeoutId) {
+                    clearTimeout(pollTimeoutId);
+                    pollTimeoutId = null;
+                }
+
+                // Send destroy request via WebSocket
+                ws.send(JSON.stringify({
+                    type: 'destroy_stream',
+                    streamId: currentStreamId
+                }));
+
+                // Also call API as backup
                 await apiCall(`/streams/${currentStreamId}`, {
                     method: 'DELETE'
                 });
                 
-                log(`Stream ${currentStreamId} destroyed`, 'success');
+                log(`Stream ${currentStreamId} destroy request sent`, 'success');
                 
                 currentStreamId = null;
                 currentStream = null;
@@ -341,37 +341,41 @@
                 destroyStreamBtn.disabled = true;
                 
                 streamInfo.classList.remove('visible');
+                updateStatus(true, 'Connected to server');
                 
             } catch (error) {
                 log(`Failed to destroy stream: ${error.message}`, 'error');
             }
         }
 
-        // Stream status polling
-        async function pollStreamStatus() {
+        // Fallback polling (only as backup, much less frequent)
+        async function fallbackPoll() {
             if (!currentStreamId) return;
 
             try {
+                log('Fallback API poll for stream status', 'info');
                 const stream = await apiCall(`/streams/${currentStreamId}`);
-                currentStream = stream;
                 
                 updateStreamInfo(stream);
                 
                 if (stream.status === 'ready' && stream.metadata.filename) {
-                    log(`Stream ready! File: ${stream.metadata.filename}`, 'success');
+                    log(`Stream ready via fallback poll! File: ${stream.metadata.filename}`, 'success');
                     startVideoPlayback();
                     updateStatus(true, 'Stream ready');
+                    return; // Stop polling
                 } else if (stream.status === 'error') {
-                    log(`Stream error: ${stream.error || 'Unknown error'}`, 'error');
+                    log(`Stream error via fallback poll: ${stream.error || 'Unknown error'}`, 'error');
                     updateStatus(true, 'Stream failed');
-                } else {
-                    // Continue polling
-                    setTimeout(pollStreamStatus, 2000);
+                    return; // Stop polling
                 }
                 
+                // Continue fallback polling every 10 seconds (much less frequent)
+                pollTimeoutId = setTimeout(fallbackPoll, 10000);
+                
             } catch (error) {
-                log(`Failed to get stream status: ${error.message}`, 'error');
-                setTimeout(pollStreamStatus, 5000); // Retry with longer delay
+                log(`Fallback poll failed: ${error.message}`, 'error');
+                // Continue trying with longer delay
+                pollTimeoutId = setTimeout(fallbackPoll, 15000);
             }
         }
 
@@ -419,7 +423,7 @@
             }
         }
 
-        // WebSocket connection
+        // Enhanced WebSocket connection with comprehensive event handling
         function connectWebSocket() {
             ws = new WebSocket(`ws://${window.location.hostname}:6543`);
 
@@ -431,6 +435,13 @@
             ws.onclose = () => {
                 log('WebSocket connection closed. Attempting to reconnect...', 'error');
                 updateStatus(false);
+                
+                // Cancel any ongoing polling
+                if (pollTimeoutId) {
+                    clearTimeout(pollTimeoutId);
+                    pollTimeoutId = null;
+                }
+                
                 setTimeout(connectWebSocket, 3000);
             };
 
@@ -449,33 +460,93 @@
                             log(`Connected with client ID: ${clientId}`, 'success');
                             break;
                             
+                        case 'stream_created':
+                            currentStreamId = msg.streamId;
+                            log(`Stream created with ID: ${currentStreamId}`, 'success');
+                            
+                            updateStreamInfo({
+                                streamId: currentStreamId,
+                                status: 'initializing',
+                                metadata: {}
+                            });
+                            
+                            destroyStreamBtn.disabled = false;
+                            updateStatus(true, 'Stream initializing...');
+                            
+                            // Start very light fallback polling as backup (only if WebSocket fails)
+                            pollTimeoutId = setTimeout(fallbackPoll, 15000); // Wait 15 seconds before fallback
+                            break;
+                            
                         case 'stream_ready':
-                            log(`Stream ready notification: ${JSON.stringify(msg.data)}`, 'success');
+                            log(`🎉 Stream ready notification: ${JSON.stringify(msg.data)}`, 'success');
+                            
+                            // Cancel fallback polling since WebSocket worked
+                            if (pollTimeoutId) {
+                                clearTimeout(pollTimeoutId);
+                                pollTimeoutId = null;
+                            }
+                            
                             if (msg.streamId === currentStreamId) {
-                                pollStreamStatus(); // Refresh status
+                                updateStreamInfo({
+                                    streamId: msg.streamId,
+                                    status: 'ready',
+                                    metadata: msg.data
+                            });
+                            startVideoPlayback();
+                            updateStatus(true, 'Stream ready - Playing video');
                             }
                             break;
                             
                         case 'stream_error':
-                            log(`Stream error notification: ${msg.data?.error}`, 'error');
+                            log(`❌ Stream error notification: ${msg.data?.error}`, 'error');
+                            
+                            // Cancel fallback polling
+                            if (pollTimeoutId) {
+                                clearTimeout(pollTimeoutId);
+                                pollTimeoutId = null;
+                            }
+                            
+                            if (msg.streamId === currentStreamId) {
+                                updateStreamInfo({
+                                    streamId: msg.streamId,
+                                    status: 'error',
+                                    metadata: { error: msg.data?.error }
+                                });
+                                updateStatus(true, 'Stream failed');
+                            }
                             break;
                             
                         case 'stream_destroyed':
-                            log(`Stream destroyed notification: ${msg.streamId}`, 'info');
+                            log(`🗑️ Stream destroyed notification: ${msg.streamId}`, 'info');
+                            
+                            if (msg.streamId === currentStreamId) {
+                                currentStreamId = null;
+                                currentStream = null;
+                                videoPlayer.src = '';
+                                streamInfo.classList.remove('visible');
+                                createStreamBtn.disabled = false;
+                                destroyStreamBtn.disabled = true;
+                                updateStatus(true, 'Connected to server');
+                            }
+                            break;
+                            
+                        case 'pong':
+                            // Handle ping/pong for connection health
                             break;
                             
                         default:
-                            log(`Unknown message type: ${msg.type}`, 'info');
+                            log(`Unknown WebSocket message: ${msg.type}`, 'info');
                     }
                 } catch (e) {
                     log('Error parsing WebSocket message', 'error');
+                    console.error('WebSocket parse error:', e);
                 }
             };
         }
 
         // Initialize
         document.addEventListener('DOMContentLoaded', () => {
-            log('Initializing Multi-Platform Video Streamer');
+            log('Initializing WebSocket-First Video Streamer');
             connectWebSocket();
             
             // Auto-refresh stats every 30 seconds
@@ -485,7 +556,17 @@
         // Cleanup on page unload
         window.addEventListener('beforeunload', () => {
             if (currentStreamId) {
-                destroyCurrentStream();
+                // Quick cleanup via WebSocket
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({
+                        type: 'destroy_stream',
+                        streamId: currentStreamId
+                    }));
+                }
+            }
+            
+            if (pollTimeoutId) {
+                clearTimeout(pollTimeoutId);
             }
         });
     </script>
