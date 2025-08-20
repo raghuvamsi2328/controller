@@ -222,18 +222,25 @@ class StreamManager {
 
         engine.on('ready', () => {
             console.log(`✅ [${id}] Engine ready`);
+            console.log(`📁 [${id}] Total files in torrent: ${engine.files.length}`);
             
-            const videoFile = engine.files
-                .filter(file => {
-                    const name = file.name.toLowerCase();
-                    return name.match(/\.(mp4|mkv|avi|mov|wmv|flv|webm)$/);
-                })
-                .sort((a, b) => b.length - a.length)[0];
+            // Log all files for debugging
+            engine.files.forEach((file, index) => {
+                console.log(`📄 [${id}] File ${index}: ${file.name} (${(file.length / 1024 / 1024).toFixed(2)}MB)`);
+            });
+            
+            const videoFile = this.findBestVideoFile(engine.files, id);
 
             if (!videoFile) {
                 streamData.status = 'error';
-                streamData.error = 'No video file found';
+                streamData.error = 'No suitable video file found';
                 console.log(`❌ [${id}] No video file found`);
+                console.log(`📋 [${id}] Available files:`, engine.files.map(f => ({ 
+                    name: f.name, 
+                    size: `${(f.length / 1024 / 1024).toFixed(2)}MB`,
+                    extension: path.extname(f.name).toLowerCase()
+                })));
+                this.notifyClients(id, 'stream_error', { error: 'No suitable video file found' });
                 return;
             }
 
@@ -243,10 +250,14 @@ class StreamManager {
                 filename: videoFile.name,
                 size: videoFile.length,
                 duration: null,
-                bitrate: null
+                bitrate: null,
+                container: path.extname(videoFile.name).toLowerCase(),
+                isInFolder: videoFile.name.includes('/') || videoFile.name.includes('\\')
             };
 
             console.log(`✅ [${id}] Video ready: ${videoFile.name} (${(videoFile.length / 1024 / 1024).toFixed(2)} MB)`);
+            console.log(`📦 [${id}] Container: ${streamData.metadata.container}, In folder: ${streamData.metadata.isInFolder}`);
+            
             this.notifyClients(id, 'stream_ready', streamData.metadata);
         });
 
@@ -261,6 +272,108 @@ class StreamManager {
             streamData.error = err.message;
             this.notifyClients(id, 'stream_error', { error: err.message });
         });
+    }
+
+    findBestVideoFile(files, streamId) {
+        console.log(`🔍 [${streamId}] Searching for best video file among ${files.length} files`);
+        
+        // Define video extensions with priority (higher score = better)
+        const videoExtensions = {
+            '.mp4': 10,   // Best compatibility
+            '.mkv': 9,    // High quality, good support
+            '.avi': 7,    // Good compatibility
+            '.mov': 6,    // Apple format
+            '.wmv': 5,    // Windows format
+            '.flv': 4,    // Flash video
+            '.webm': 8,   // Web format
+            '.m4v': 9,    // iTunes format
+            '.mpg': 3,    // Older format
+            '.mpeg': 3,   // Older format
+            '.3gp': 2,    // Mobile format
+            '.ts': 6      // Transport stream
+        };
+
+        // Filter video files
+        const videoFiles = files.filter(file => {
+            const extension = path.extname(file.name).toLowerCase();
+            return videoExtensions.hasOwnProperty(extension);
+        });
+
+        if (videoFiles.length === 0) {
+            console.log(`❌ [${streamId}] No video files found`);
+            return null;
+        }
+
+        console.log(`📹 [${streamId}] Found ${videoFiles.length} video files`);
+
+        // Score each video file
+        const scoredFiles = videoFiles.map(file => {
+            const extension = path.extname(file.name).toLowerCase();
+            const basename = path.basename(file.name).toLowerCase();
+            const dirname = path.dirname(file.name).toLowerCase();
+            
+            let score = 0;
+            
+            // Base score from extension
+            score += videoExtensions[extension] || 0;
+            
+            // File size scoring (prefer larger files, but not tiny or extremely large)
+            const sizeMB = file.length / (1024 * 1024);
+            if (sizeMB > 100 && sizeMB < 20000) { // Between 100MB and 20GB
+                score += Math.min(10, sizeMB / 1000); // Up to 10 points for size
+            } else if (sizeMB <= 100) {
+                score -= 5; // Penalize very small files (likely samples/trailers)
+            }
+            
+            // Prefer files not in sample/trailer folders
+            if (dirname.includes('sample') || dirname.includes('trailer') || dirname.includes('preview')) {
+                score -= 15;
+                console.log(`⚠️ [${streamId}] Penalizing sample/trailer: ${file.name}`);
+            }
+            
+            // Penalize sample/trailer files by name
+            if (basename.includes('sample') || basename.includes('trailer') || basename.includes('preview')) {
+                score -= 10;
+                console.log(`⚠️ [${streamId}] Penalizing sample/trailer by name: ${file.name}`);
+            }
+            
+            // Prefer main movie folders
+            if (dirname === '.' || dirname === '' || !dirname.includes('/')) {
+                score += 5; // Bonus for root-level files
+            }
+            
+            // Bonus for common movie indicators
+            if (basename.includes('1080p') || basename.includes('720p') || basename.includes('4k')) {
+                score += 3;
+            }
+            
+            // Bonus for main feature indicators
+            if (basename.includes('feature') || basename.includes('main')) {
+                score += 5;
+            }
+
+            return {
+                file,
+                score,
+                extension,
+                sizeMB: sizeMB.toFixed(2),
+                path: file.name
+            };
+        });
+
+        // Sort by score (highest first)
+        scoredFiles.sort((a, b) => b.score - a.score);
+
+        // Log scoring results
+        console.log(`🏆 [${streamId}] Video file scoring results:`);
+        scoredFiles.forEach((item, index) => {
+            console.log(`  ${index + 1}. ${item.path} (${item.extension}, ${item.sizeMB}MB, score: ${item.score})`);
+        });
+
+        const bestFile = scoredFiles[0].file;
+        console.log(`✅ [${streamId}] Selected best video: ${bestFile.name}`);
+        
+        return bestFile;
     }
 
     updateDiskUsage(streamData) {
@@ -514,10 +627,40 @@ app.get('/stream/:streamId', (req, res) => {
     const videoFile = stream.videoFile;
     const fileSize = videoFile.length;
     const rangeHeader = req.headers.range;
+    const extension = path.extname(videoFile.name).toLowerCase();
 
-    console.log(`📺 [${streamId}] Streaming request from ${req.ip}`);
+    console.log(`📺 [${streamId}] Streaming request: ${videoFile.name} (${extension}) from ${req.ip}`);
 
-    // Handle range requests (crucial for mobile/TV)
+    // Set appropriate content type based on file extension
+    let contentType = 'video/mp4'; // Default
+    switch (extension) {
+        case '.mkv':
+            contentType = 'video/x-matroska';
+            break;
+        case '.avi':
+            contentType = 'video/x-msvideo';
+            break;
+        case '.mov':
+            contentType = 'video/quicktime';
+            break;
+        case '.wmv':
+            contentType = 'video/x-ms-wmv';
+            break;
+        case '.flv':
+            contentType = 'video/x-flv';
+            break;
+        case '.webm':
+            contentType = 'video/webm';
+            break;
+        case '.m4v':
+            contentType = 'video/mp4';
+            break;
+        case '.ts':
+            contentType = 'video/mp2t';
+            break;
+    }
+
+    // Handle range requests (crucial for all video formats)
     if (rangeHeader) {
         const ranges = rangeParser(fileSize, rangeHeader);
 
@@ -532,28 +675,43 @@ app.get('/stream/:streamId', (req, res) => {
         res.setHeader('Content-Length', contentLength);
         res.setHeader('Content-Range', `bytes ${start}-${end}/${fileSize}`);
         res.setHeader('Accept-Ranges', 'bytes');
-        res.setHeader('Content-Type', 'video/mp4');
+        res.setHeader('Content-Type', contentType);
         
-        // CORS headers for cross-platform access
+        // Enhanced headers for better MKV/video support
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.setHeader('Access-Control-Allow-Headers', 'Range');
+        res.setHeader('Cache-Control', 'no-cache');
+        
+        // For MKV files, add specific headers
+        if (extension === '.mkv') {
+            res.setHeader('X-Content-Type-Options', 'nosniff');
+        }
 
         const streamInstance = videoFile.createReadStream({ start, end });
+        
         streamInstance.on('error', (err) => {
             console.error(`❌ [${streamId}] Stream error:`, err.message);
+            if (!res.headersSent) {
+                res.status(500).end();
+            }
         });
 
         streamInstance.pipe(res);
     } else {
         res.status(200);
         res.setHeader('Content-Length', fileSize);
-        res.setHeader('Content-Type', 'video/mp4');
+        res.setHeader('Content-Type', contentType);
         res.setHeader('Accept-Ranges', 'bytes');
         res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Cache-Control', 'no-cache');
 
         const streamInstance = videoFile.createReadStream();
+        
         streamInstance.on('error', (err) => {
             console.error(`❌ [${streamId}] Stream error:`, err.message);
+            if (!res.headersSent) {
+                res.status(500).end();
+            }
         });
 
         streamInstance.pipe(res);
