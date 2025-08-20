@@ -1,17 +1,24 @@
-import WebTorrent from 'webtorrent';
-import { WebSocketServer } from 'ws';
 import express from 'express';
 import http from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import rangeParser from 'range-parser';
 import cors from 'cors';
-import crypto from 'crypto';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
+import { WebSocketServer } from 'ws';
+import peerflix from 'peerflix';
+import { v4 as uuidv4 } from 'uuid';
 
-// Simple UUID generator that works in all Node.js versions
-function generateSessionId() {
-    return 'session_' + Math.random().toString(36).substr(2, 9) + '_' + Date.now().toString(36);
-}
+// --- Configuration ---
+const CONFIG = {
+    PORT: process.env.PORT || 6543,
+    HOST: process.env.HOST || '0.0.0.0',
+    MAX_CONCURRENT_STREAMS: process.env.MAX_STREAMS || 50,
+    CLEANUP_INTERVAL: 5 * 60 * 1000, // 5 minutes
+    STREAM_TIMEOUT: 30 * 60 * 1000,  // 30 minutes
+    TEMP_DIR: process.env.TEMP_DIR || '/tmp/torrent-streams'
+};
 
 // --- Setup ---
 const __filename = fileURLToPath(import.meta.url);
@@ -21,314 +28,448 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
-// More aggressive Docker-friendly WebTorrent configuration
-const client = new WebTorrent({
-    // Completely disable DHT and PEX (peer discovery methods that require UDP)
-    dht: false,
-    lsd: false,  // Disable Local Service Discovery
-    pex: false,  // Disable Peer Exchange
-    
-    // Enable web seeds (HTTP/HTTPS based downloading)
-    webSeeds: true,
-    
-    // Force use of WebSocket trackers only (no UDP)
-    tracker: {
-        wrtc: false,  // Disable WebRTC in server environment
-        announce: [
-            // Use only WebSocket trackers that work well in Docker
-            'wss://tracker.openwebtorrent.com',
-            'wss://tracker.btorrent.xyz',
-            'wss://tracker.fastcast.nz'
-        ],
-        getAnnounceOpts: () => ({
-            numwant: 20,
-            uploaded: 0,
-            downloaded: 0,
-            left: 0,
-            compact: 1
-        })
-    }
+// --- Security & Middleware ---
+app.use(helmet({
+    contentSecurityPolicy: false // Allow media streaming
+}));
+
+app.use(cors({
+    origin: true, // Allow all origins for multi-platform support
+    credentials: true
+}));
+
+// Rate limiting for API protection
+const limiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 100, // Limit each IP to 100 requests per windowMs
+    message: { error: 'Too many requests, please try again later.' }
 });
+app.use('/api/', limiter);
 
-const PORT = 6543;
+app.use(express.json());
 
-// Add error handler for WebTorrent client
-client.on('error', (err) => {
-    console.error('🔥 WebTorrent client error:', err.message);
-    console.error('🔥 Error stack:', err.stack);
-});
-
-// Test WebTorrent client immediately after creation
-console.log('🔍 Testing WebTorrent client...');
-console.log('🔍 Client ready:', client.ready);
-console.log('🔍 Client DHT enabled:', client.dht ? 'YES' : 'NO');
-console.log('🔍 Client tracker config:', JSON.stringify(client.tracker, null, 2));
-
-// Use CORS to allow requests from other domains
-app.use(cors());
-
-// Serve the HTML file from the 'view' folder
+// Serve static files (for web frontend)
 app.use(express.static(path.join(__dirname, 'view')));
 
-// --- State ---
-const activeTorrents = new Map();
-const defaultMagnetLink = 'magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10&dn=Sintel&tr=wss%3A%2F%2Ftracker.btorrent.xyz&tr=wss%3A%2F%2Ftracker.openwebtorrent.com&tr=wss%3A%2F%2Ftracker.fastcast.nz';
+// --- Global State Management ---
+class StreamManager {
+    constructor() {
+        this.activeStreams = new Map();
+        this.clientSessions = new Map();
+        this.startCleanupInterval();
+    }
 
-// --- Functions ---
-function startStream(magnetLink, ws) {
-    try {
-        console.log(`🔍 [DEBUG] startStream called with magnet: ${magnetLink.substring(0, 80)}...`);
+    createStream(magnetLink, clientId) {
+        const streamId = uuidv4();
+        const timestamp = Date.now();
         
-        if (ws.sessionId) {
-            const oldTorrent = activeTorrents.get(ws.sessionId);
-            if (oldTorrent) {
-                console.log(`🗑️ Clearing previous stream for session: ${ws.sessionId}`);
-                client.remove(oldTorrent, { destroyStore: true });
-                activeTorrents.delete(ws.sessionId);
-            }
-        }
-
-        const sessionId = generateSessionId();
-        ws.sessionId = sessionId;
-        console.log(`🔍 [DEBUG] Generated session ID: ${sessionId}`);
-
-        console.log(`🚀 [${sessionId}] Starting torrent for:`, magnetLink);
+        console.log(`🚀 [${streamId}] Creating stream for client ${clientId}`);
         
-        let torrent;
-        try {
-            console.log(`🔍 [DEBUG] About to call client.add...`);
-            
-            // Add torrent with VERY conservative options to prevent crashes
-            torrent = client.add(magnetLink, { 
-                destroyStoreOnDestroy: true,
-                maxConns: 2,  // Even more conservative
-                downloadLimit: 1024 * 1024,  // 1 MB/s limit
-                uploadLimit: 0,
-                strategy: 'sequential',
-                // Try to force only WebSocket trackers
-                tracker: false,  // Disable automatic tracker discovery
-                announce: []     // Don't use any additional trackers
-            });
-            
-            console.log(`🔍 [DEBUG] client.add completed successfully`);
-            console.log(`🔍 [DEBUG] Torrent infoHash: ${torrent.infoHash}`);
-        } catch (addError) {
-            console.error(`❌ [${sessionId}] Failed to add torrent:`, addError.message);
-            ws.send(JSON.stringify({ type: 'error', message: 'Failed to add torrent. Invalid magnet link.' }));
-            return;
-        }
-
-        activeTorrents.set(sessionId, torrent);
-        console.log(`🔍 [DEBUG] Torrent added to activeTorrents map`);
-
-        // Add more specific event handlers to catch what's causing the crash
-        torrent.on('infoHash', () => {
-            console.log(`🔍 [${sessionId}] Torrent infoHash obtained`);
+        const engine = peerflix(magnetLink, {
+            connections: 10,
+            uploads: 0,
+            path: `${CONFIG.TEMP_DIR}/${streamId}`,
+            quiet: false,
+            tracker: true,
+            dht: false,
+            webSeeds: true
         });
 
-        torrent.on('metadata', () => {
-            console.log(`🔍 [${sessionId}] Torrent metadata received`);
-        });
+        const streamData = {
+            id: streamId,
+            clientId,
+            engine,
+            magnetLink,
+            status: 'initializing',
+            createdAt: timestamp,
+            lastAccessed: timestamp,
+            videoFile: null,
+            metadata: {}
+        };
 
-        torrent.on('ready', () => {
-            try {
-                console.log(`✅ [${sessionId}] Torrent ready: ${torrent.name}`);
-                console.log(`🔍 [DEBUG] Torrent has ${torrent.files.length} files`);
-                
-                const videoFile = torrent.files.find(file => {
+        this.activeStreams.set(streamId, streamData);
+        
+        // Link client to stream
+        if (!this.clientSessions.has(clientId)) {
+            this.clientSessions.set(clientId, new Set());
+        }
+        this.clientSessions.get(clientId).add(streamId);
+
+        this.setupEngineEvents(streamData);
+        return streamData;
+    }
+
+    setupEngineEvents(streamData) {
+        const { id, engine } = streamData;
+
+        engine.on('ready', () => {
+            console.log(`✅ [${id}] Engine ready`);
+            
+            const videoFile = engine.files
+                .filter(file => {
                     const name = file.name.toLowerCase();
-                    return name.endsWith('.mp4') || name.endsWith('.mkv') || name.endsWith('.avi');
-                });
+                    return name.match(/\.(mp4|mkv|avi|mov|wmv|flv|webm)$/);
+                })
+                .sort((a, b) => b.length - a.length)[0];
 
-                if (!videoFile) {
-                    console.log(`❌ [${sessionId}] No video file found in torrent`);
-                    console.log(`🔍 [DEBUG] Available files:`, torrent.files.map(f => f.name));
-                    ws.send(JSON.stringify({ type: 'error', message: 'No video file found.' }));
-                    return;
-                }
-                
-                console.log(`✅ [${sessionId}] File ready: ${videoFile.name}`);
-                ws.send(JSON.stringify({
-                    type: 'streamReady',
-                    url: `/stream/${sessionId}?filename=${encodeURIComponent(videoFile.name)}`
-                }));
-            } catch (readyError) {
-                console.error(`❌ [${sessionId}] Error in ready handler:`, readyError.message);
-                ws.send(JSON.stringify({ type: 'error', message: 'Error processing torrent files.' }));
+            if (!videoFile) {
+                streamData.status = 'error';
+                streamData.error = 'No video file found';
+                console.log(`❌ [${id}] No video file found`);
+                return;
             }
+
+            streamData.status = 'ready';
+            streamData.videoFile = videoFile;
+            streamData.metadata = {
+                filename: videoFile.name,
+                size: videoFile.length,
+                duration: null, // Could be extracted with ffprobe
+                bitrate: null
+            };
+
+            console.log(`✅ [${id}] Video ready: ${videoFile.name} (${(videoFile.length / 1024 / 1024).toFixed(2)} MB)`);
+            this.notifyClients(id, 'stream_ready', streamData.metadata);
         });
 
-        torrent.on('error', (err) => {
-            console.error(`❌ [${sessionId}] Torrent error:`, err.message);
-            console.error(`❌ [${sessionId}] Error stack:`, err.stack);
-            ws.send(JSON.stringify({ type: 'error', message: `Torrent error: ${err.message}` }));
-            activeTorrents.delete(sessionId);
+        engine.on('error', (err) => {
+            console.error(`❌ [${id}] Engine error:`, err.message);
+            streamData.status = 'error';
+            streamData.error = err.message;
+            this.notifyClients(id, 'stream_error', { error: err.message });
         });
+    }
 
-        // Log when peers connect (this might be where it crashes)
-        torrent.on('wire', (wire) => {
-            console.log(`🔍 [${sessionId}] New peer connection. Total peers: ${torrent.numPeers}`);
-            
-            // Add error handler for individual wire connections
-            wire.on('error', (wireError) => {
-                console.error(`❌ [${sessionId}] Wire error:`, wireError.message);
-            });
-        });
-
-        // Log download events (another potential crash point)
-        torrent.on('download', (bytes) => {
-            console.log(`🔍 [${sessionId}] Downloaded ${bytes} bytes. Progress: ${(torrent.progress * 100).toFixed(1)}%`);
-        });
-
-        console.log(`🔍 [DEBUG] Event listeners set up successfully`);
-
-        // Add a timeout to see if the torrent stalls
-        setTimeout(() => {
-            if (!torrent.ready) {
-                console.log(`⏰ [${sessionId}] Status check: ready=${torrent.ready}, numPeers=${torrent.numPeers}, downloaded=${torrent.downloaded}`);
-            }
-        }, 10000);
-
-    } catch (error) {
-        console.error('❌ Critical error in startStream:', error.message);
-        console.error('Stack trace:', error.stack);
-        if (ws.readyState === ws.OPEN) {
-            ws.send(JSON.stringify({ type: 'error', message: 'Server error occurred.' }));
+    getStream(streamId) {
+        const stream = this.activeStreams.get(streamId);
+        if (stream) {
+            stream.lastAccessed = Date.now();
         }
+        return stream;
+    }
+
+    destroyStream(streamId, reason = 'manual') {
+        const stream = this.activeStreams.get(streamId);
+        if (!stream) return false;
+
+        console.log(`🗑️ [${streamId}] Destroying stream (${reason})`);
+        
+        try {
+            stream.engine.destroy();
+        } catch (e) {
+            console.error(`Error destroying engine: ${e.message}`);
+        }
+
+        // Remove from client sessions
+        if (this.clientSessions.has(stream.clientId)) {
+            this.clientSessions.get(stream.clientId).delete(streamId);
+            if (this.clientSessions.get(stream.clientId).size === 0) {
+                this.clientSessions.delete(stream.clientId);
+            }
+        }
+
+        this.activeStreams.delete(streamId);
+        this.notifyClients(streamId, 'stream_destroyed', { reason });
+        return true;
+    }
+
+    destroyClientStreams(clientId) {
+        const clientStreams = this.clientSessions.get(clientId);
+        if (!clientStreams) return 0;
+
+        let destroyed = 0;
+        for (const streamId of clientStreams) {
+            if (this.destroyStream(streamId, 'client_disconnect')) {
+                destroyed++;
+            }
+        }
+        return destroyed;
+    }
+
+    notifyClients(streamId, event, data) {
+        const message = JSON.stringify({
+            type: event,
+            streamId,
+            data,
+            timestamp: Date.now()
+        });
+
+        wss.clients.forEach(client => {
+            if (client.readyState === client.OPEN) {
+                try {
+                    client.send(message);
+                } catch (e) {
+                    console.error('Error sending WebSocket message:', e.message);
+                }
+            }
+        });
+    }
+
+    startCleanupInterval() {
+        setInterval(() => {
+            const now = Date.now();
+            let cleaned = 0;
+
+            for (const [streamId, stream] of this.activeStreams) {
+                const age = now - stream.lastAccessed;
+                if (age > CONFIG.STREAM_TIMEOUT) {
+                    this.destroyStream(streamId, 'timeout');
+                    cleaned++;
+                }
+            }
+
+            if (cleaned > 0) {
+                console.log(`🧹 Cleaned up ${cleaned} inactive streams`);
+            }
+        }, CONFIG.CLEANUP_INTERVAL);
+    }
+
+    getStats() {
+        return {
+            activeStreams: this.activeStreams.size,
+            connectedClients: this.clientSessions.size,
+            totalConnections: wss.clients.size,
+            uptime: process.uptime()
+        };
     }
 }
 
-// --- HTTP Streaming Endpoint ---
-// The route now includes the sessionId parameter.
-app.get('/stream/:sessionId', (req, res) => {
-    const { sessionId } = req.params;
-    const torrent = activeTorrents.get(sessionId); // Look up the specific torrent for this session.
+const streamManager = new StreamManager();
 
-    if (!torrent || !torrent.ready) {
-        return res.status(404).send('Stream not found or not ready. Please select a torrent first.');
+// --- REST API Routes (for all platforms) ---
+
+// Health check
+app.get('/api/health', (req, res) => {
+    res.json({
+        status: 'healthy',
+        timestamp: Date.now(),
+        stats: streamManager.getStats()
+    });
+});
+
+// Create new stream
+app.post('/api/streams', (req, res) => {
+    const { magnetLink, clientId } = req.body;
+    
+    if (!magnetLink || !clientId) {
+        return res.status(400).json({
+            error: 'magnetLink and clientId are required'
+        });
     }
 
-    const { filename } = req.query;
-    const file = torrent.files.find(f => f.name === filename);
+    try {
+        const stream = streamManager.createStream(magnetLink, clientId);
+        res.status(201).json({
+            streamId: stream.id,
+            status: stream.status,
+            createdAt: stream.createdAt
+        });
+    } catch (error) {
+        console.error('Error creating stream:', error);
+        res.status(500).json({
+            error: 'Failed to create stream'
+        });
+    }
+});
 
-    if (!file) {
-        return res.status(404).send('File not found in torrent.');
+// Get stream info
+app.get('/api/streams/:streamId', (req, res) => {
+    const { streamId } = req.params;
+    const stream = streamManager.getStream(streamId);
+    
+    if (!stream) {
+        return res.status(404).json({
+            error: 'Stream not found'
+        });
     }
 
-    const fileSize = file.length;
+    res.json({
+        streamId: stream.id,
+        status: stream.status,
+        metadata: stream.metadata,
+        createdAt: stream.createdAt,
+        lastAccessed: stream.lastAccessed
+    });
+});
+
+// Delete stream
+app.delete('/api/streams/:streamId', (req, res) => {
+    const { streamId } = req.params;
+    const destroyed = streamManager.destroyStream(streamId);
+    
+    if (!destroyed) {
+        return res.status(404).json({
+            error: 'Stream not found'
+        });
+    }
+
+    res.json({
+        message: 'Stream destroyed successfully'
+    });
+});
+
+// List all streams (admin endpoint)
+app.get('/api/streams', (req, res) => {
+    const streams = Array.from(streamManager.activeStreams.values()).map(stream => ({
+        streamId: stream.id,
+        status: stream.status,
+        metadata: stream.metadata,
+        createdAt: stream.createdAt,
+        lastAccessed: stream.lastAccessed
+    }));
+
+    res.json({
+        streams,
+        total: streams.length
+    });
+});
+
+// --- Video Streaming Endpoint ---
+app.get('/stream/:streamId', (req, res) => {
+    const { streamId } = req.params;
+    const stream = streamManager.getStream(streamId);
+
+    if (!stream || stream.status !== 'ready' || !stream.videoFile) {
+        return res.status(404).json({
+            error: 'Stream not ready or not found'
+        });
+    }
+
+    const videoFile = stream.videoFile;
+    const fileSize = videoFile.length;
     const rangeHeader = req.headers.range;
 
-    let stream;
+    console.log(`📺 [${streamId}] Streaming request from ${req.ip}`);
 
+    // Handle range requests (crucial for mobile/TV)
     if (rangeHeader) {
         const ranges = rangeParser(fileSize, rangeHeader);
 
         if (ranges === -1 || ranges === -2) {
-            res.status(416).send('Malformed Range header');
-            return;
+            return res.status(416).json({ error: 'Invalid range' });
         }
 
         const { start, end } = ranges[0];
         const contentLength = end - start + 1;
 
-        res.status(206); // Partial Content
+        res.status(206);
         res.setHeader('Content-Length', contentLength);
         res.setHeader('Content-Range', `bytes ${start}-${end}/${fileSize}`);
         res.setHeader('Accept-Ranges', 'bytes');
         res.setHeader('Content-Type', 'video/mp4');
+        
+        // CORS headers for cross-platform access
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Access-Control-Allow-Headers', 'Range');
 
-        stream = file.createReadStream({ start, end });
+        const streamInstance = videoFile.createReadStream({ start, end });
+        streamInstance.on('error', (err) => {
+            console.error(`❌ [${streamId}] Stream error:`, err.message);
+        });
+
+        streamInstance.pipe(res);
     } else {
         res.status(200);
         res.setHeader('Content-Length', fileSize);
         res.setHeader('Content-Type', 'video/mp4');
-        stream = file.createReadStream();
+        res.setHeader('Accept-Ranges', 'bytes');
+        res.setHeader('Access-Control-Allow-Origin', '*');
+
+        const streamInstance = videoFile.createReadStream();
+        streamInstance.on('error', (err) => {
+            console.error(`❌ [${streamId}] Stream error:`, err.message);
+        });
+
+        streamInstance.pipe(res);
     }
-
-    // ** THE FIX IS HERE **
-    // Add listeners to gracefully handle stream lifecycle events.
-
-    // When the client closes the connection (e.g., closes the tab), destroy the torrent stream.
-    res.on('close', () => {
-        if (!stream.destroyed) {
-            console.log('Client closed connection, destroying stream.');
-            stream.destroy();
-        }
-    });
-
-    // When the stream has an error (e.g., the torrent was destroyed by a new request),
-    // log it and end the response. This prevents the 'afterdestroy' crash.
-    stream.on('error', (err) => {
-        console.error('Stream error:', err.message);
-        // We can't send headers anymore, just end the connection.
-        if (!res.headersSent) {
-            res.status(500).send('Stream error');
-        } else {
-            res.end();
-        }
-    });
-
-    // Pipe the data to the response.
-    stream.pipe(res);
 });
 
-// Add this test endpoint before your WebSocket logic
-app.get('/test-stream', (req, res) => {
-    // Create a simple test video response
-    res.setHeader('Content-Type', 'video/mp4');
-    res.setHeader('Accept-Ranges', 'bytes');
-    res.status(200).send('This is a test stream endpoint. Your server is working correctly.');
-});
+// --- WebSocket for Real-time Updates ---
+wss.on('connection', (ws, req) => {
+    const clientId = uuidv4();
+    ws.clientId = clientId;
+    
+    console.log(`🔌 Client connected: ${clientId} from ${req.socket.remoteAddress}`);
+    
+    ws.send(JSON.stringify({
+        type: 'connected',
+        clientId,
+        timestamp: Date.now()
+    }));
 
-
-// --- WebSocket Logic ---
-wss.on('connection', ws => {
-    console.log('New client connected.');
-    ws.send(JSON.stringify({ type: 'connected' }));
-
-    ws.on('message', message => {
+    ws.on('message', (message) => {
         try {
             const data = JSON.parse(message);
-            if (data.type === 'setMagnetLink' && data.magnetLink) {
-                startStream(data.magnetLink, ws);
-            } else if (data.type === 'startDefault') {
-                startStream(defaultMagnetLink, ws);
+            
+            switch (data.type) {
+                case 'create_stream':
+                    if (data.magnetLink) {
+                        const stream = streamManager.createStream(data.magnetLink, clientId);
+                        ws.send(JSON.stringify({
+                            type: 'stream_created',
+                            streamId: stream.id,
+                            timestamp: Date.now()
+                        }));
+                    }
+                    break;
+                    
+                case 'ping':
+                    ws.send(JSON.stringify({
+                        type: 'pong',
+                        timestamp: Date.now()
+                    }));
+                    break;
             }
         } catch (e) {
-            console.error('Failed to parse message:', e);
+            console.error('Invalid WebSocket message:', e.message);
         }
     });
 
-    // When a client disconnects, clean up their associated torrent.
     ws.on('close', () => {
-        console.log('Client disconnected.');
-        if (ws.sessionId) {
-            const torrent = activeTorrents.get(ws.sessionId);
-            if (torrent) {
-                console.log(`🧹 Cleaning up torrent for session: ${ws.sessionId}`);
-                client.remove(torrent, { destroyStore: true });
-                activeTorrents.delete(ws.sessionId);
-            }
+        console.log(`🔌 Client disconnected: ${clientId}`);
+        const destroyed = streamManager.destroyClientStreams(clientId);
+        if (destroyed > 0) {
+            console.log(`🧹 Cleaned up ${destroyed} streams for client ${clientId}`);
         }
+    });
+
+    ws.on('error', (err) => {
+        console.error('WebSocket error:', err.message);
+    });
+});
+
+// --- Error Handling ---
+app.use((err, req, res, next) => {
+    console.error('Unhandled error:', err);
+    res.status(500).json({
+        error: 'Internal server error',
+        timestamp: Date.now()
+    });
+});
+
+// 404 handler
+app.use((req, res) => {
+    res.status(404).json({
+        error: 'Endpoint not found',
+        timestamp: Date.now()
     });
 });
 
 // --- Start Server ---
-server.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 Server running at http://0.0.0.0:${PORT}`);
-    console.log(`🌐 Network access: http://192.168.1.19:${PORT}`);
+server.listen(CONFIG.PORT, CONFIG.HOST, () => {
+    console.log(`🚀 Multi-platform streaming API running at http://${CONFIG.HOST}:${CONFIG.PORT}`);
+    console.log(`📱 Ready for Web, Mobile, and TV clients`);
+    console.log(`🔧 Max concurrent streams: ${CONFIG.MAX_CONCURRENT_STREAMS}`);
 });
 
-// Add global error handlers to prevent crashes
+// Global error handlers
 process.on('uncaughtException', (error) => {
     console.error('🔥 Uncaught Exception:', error.message);
-    console.error('Stack:', error.stack);
-    // Don't exit, just log the error
 });
 
-process.on('unhandledRejection', (reason, promise) => {
-    console.error('🔥 Unhandled Rejection at:', promise, 'reason:', reason);
-    // Don't exit, just log the error
+process.on('unhandledRejection', (reason) => {
+    console.error('🔥 Unhandled Rejection:', reason);
 });
 
 console.log('🛡️ Global error handlers installed');
+console.log('🌐 API ready for multi-platform access');

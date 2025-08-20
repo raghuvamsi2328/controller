@@ -3,148 +3,491 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Efficient Video Streamer</title>
+    <title>Multi-Platform Video Streamer</title>
     <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 20px; background-color: #f4f4f9; color: #333; }
-        .container { max-width: 800px; margin: auto; background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; 
+            margin: 20px; 
+            background-color: #f4f4f9; 
+            color: #333; 
+        }
+        .container { 
+            max-width: 900px; 
+            margin: auto; 
+            background: #fff; 
+            padding: 20px; 
+            border-radius: 8px; 
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1); 
+        }
         h1 { text-align: center; color: #444; }
-        .input-section { margin-bottom: 20px; padding: 15px; background: #f8f9fa; border: 1px solid #ddd; border-radius: 5px; }
-        #magnetInput { width: calc(100% - 24px); padding: 10px; border: 1px solid #ccc; border-radius: 4px; font-family: monospace; font-size: 14px; }
-        video { width: 100%; background: #000; border-radius: 5px; margin-top: 10px; }
-        .actions { display: flex; justify-content: center; margin: 15px 0; gap: 10px; }
-        button { background-color: #007bff; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; font-size: 16px; transition: background-color 0.2s; }
+        .stats { 
+            display: flex; 
+            justify-content: space-around; 
+            margin: 20px 0; 
+            padding: 15px; 
+            background: #e3f2fd; 
+            border-radius: 5px; 
+        }
+        .stat-item { text-align: center; }
+        .stat-value { font-size: 24px; font-weight: bold; color: #1976d2; }
+        .stat-label { font-size: 12px; color: #666; }
+        .input-section { 
+            margin-bottom: 20px; 
+            padding: 15px; 
+            background: #f8f9fa; 
+            border: 1px solid #ddd; 
+            border-radius: 5px; 
+        }
+        #magnetInput { 
+            width: calc(100% - 24px); 
+            padding: 10px; 
+            border: 1px solid #ccc; 
+            border-radius: 4px; 
+            font-family: monospace; 
+            font-size: 14px; 
+            margin-bottom: 10px;
+        }
+        video { 
+            width: 100%; 
+            background: #000; 
+            border-radius: 5px; 
+            margin-top: 10px; 
+            max-height: 500px;
+        }
+        .actions { 
+            display: flex; 
+            justify-content: center; 
+            margin: 15px 0; 
+            gap: 10px; 
+            flex-wrap: wrap;
+        }
+        button { 
+            background-color: #007bff; 
+            color: white; 
+            border: none; 
+            padding: 10px 20px; 
+            border-radius: 5px; 
+            cursor: pointer; 
+            font-size: 16px; 
+            transition: background-color 0.2s; 
+        }
         button:hover { background-color: #0056b3; }
         button:disabled { background-color: #6c757d; cursor: not-allowed; }
-        .logs { height: 150px; overflow-y: auto; background: #333; color: #f8f8f8; border: 1px solid #444; padding: 10px; font-family: monospace; font-size: 12px; border-radius: 5px; white-space: pre-wrap; }
-        .status { padding: 10px; margin: 10px 0; border-radius: 5px; text-align: center; font-weight: bold; }
+        button.success { background-color: #28a745; }
+        button.danger { background-color: #dc3545; }
+        .logs { 
+            height: 200px; 
+            overflow-y: auto; 
+            background: #333; 
+            color: #f8f8f8; 
+            border: 1px solid #444; 
+            padding: 10px; 
+            font-family: monospace; 
+            font-size: 12px; 
+            border-radius: 5px; 
+            white-space: pre-wrap; 
+            margin-top: 20px;
+        }
+        .status { 
+            padding: 10px; 
+            margin: 10px 0; 
+            border-radius: 5px; 
+            text-align: center; 
+            font-weight: bold; 
+        }
         .status.connected { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
         .status.disconnected { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        .status.loading { background-color: #fff3cd; color: #856404; border: 1px solid #ffeaa7; }
+        .stream-info { 
+            background: #f1f3f4; 
+            padding: 15px; 
+            border-radius: 5px; 
+            margin: 10px 0; 
+            display: none;
+        }
+        .stream-info.visible { display: block; }
+        .api-tests {
+            background: #e8f5e8;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 10px 0;
+        }
+        .test-result {
+            margin: 5px 0;
+            padding: 5px;
+            border-radius: 3px;
+            font-family: monospace;
+            font-size: 12px;
+        }
+        .test-success { background: #d4edda; color: #155724; }
+        .test-error { background: #f8d7da; color: #721c24; }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>Efficient Video Streamer</h1>
+        <h1>Multi-Platform Video Streamer</h1>
         
-        <div id="status" class="status disconnected">Connecting to server...</div>
-        
-        <div class="input-section">
-            <input type="text" id="magnetInput" placeholder="Enter magnet link or info hash">
-            <div class="actions">
-                <button id="startButton" onclick="startStream()" disabled>Start Stream</button>
-                <button id="defaultButton" onclick="startDefault()" disabled>Play Default</button>
+        <!-- Server Stats -->
+        <div class="stats">
+            <div class="stat-item">
+                <div class="stat-value" id="activeStreams">-</div>
+                <div class="stat-label">Active Streams</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value" id="connectedClients">-</div>
+                <div class="stat-label">Connected Clients</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value" id="uptime">-</div>
+                <div class="stat-label">Uptime (min)</div>
             </div>
         </div>
+
+        <!-- Connection Status -->
+        <div id="status" class="status disconnected">Connecting to server...</div>
         
-        <video id="videoPlayer" controls autoplay muted></video>
+        <!-- API Tests -->
+        <div class="api-tests">
+            <h3>API Tests</h3>
+            <button onclick="testHealthAPI()">Test Health API</button>
+            <button onclick="testListStreams()">List All Streams</button>
+            <div id="apiResults"></div>
+        </div>
+
+        <!-- Stream Controls -->
+        <div class="input-section">
+            <input type="text" id="magnetInput" placeholder="Enter magnet link" 
+                   value="magnet:?xt=urn:btih:dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c&dn=Big+Buck+Bunny">
+            <div class="actions">
+                <button id="createStreamBtn" onclick="createStream()" disabled>Create Stream</button>
+                <button id="destroyStreamBtn" onclick="destroyCurrentStream()" disabled>Destroy Stream</button>
+                <button onclick="refreshStats()">Refresh Stats</button>
+            </div>
+        </div>
+
+        <!-- Stream Info -->
+        <div id="streamInfo" class="stream-info">
+            <h3>Current Stream</h3>
+            <p><strong>Stream ID:</strong> <span id="currentStreamId">-</span></p>
+            <p><strong>Status:</strong> <span id="streamStatus">-</span></p>
+            <p><strong>Filename:</strong> <span id="streamFilename">-</span></p>
+            <p><strong>File Size:</strong> <span id="streamFileSize">-</span></p>
+        </div>
+        
+        <!-- Video Player -->
+        <video id="videoPlayer" controls></video>
+        
+        <!-- Logs -->
         <div class="logs" id="logs"></div>
     </div>
 
     <script>
+        // Global state
+        let ws;
+        let isConnected = false;
+        let clientId = null;
+        let currentStreamId = null;
+        let currentStream = null;
+
+        // DOM elements
         const videoPlayer = document.getElementById('videoPlayer');
         const magnetInput = document.getElementById('magnetInput');
         const logs = document.getElementById('logs');
         const status = document.getElementById('status');
-        const startButton = document.getElementById('startButton');
-        const defaultButton = document.getElementById('defaultButton');
+        const createStreamBtn = document.getElementById('createStreamBtn');
+        const destroyStreamBtn = document.getElementById('destroyStreamBtn');
+        const streamInfo = document.getElementById('streamInfo');
 
-        let ws;
-        let isConnected = false;
-
-        function log(message) {
+        // Logging function
+        function log(message, type = 'info') {
             const timestamp = new Date().toLocaleTimeString();
-            logs.innerHTML += `[${timestamp}] ${message}\n`;
+            const prefix = type === 'error' ? '❌' : type === 'success' ? '✅' : 'ℹ️';
+            logs.innerHTML += `[${timestamp}] ${prefix} ${message}\n`;
             logs.scrollTop = logs.scrollHeight;
-            console.log(`[Log] ${message}`);
+            console.log(`[${type.toUpperCase()}] ${message}`);
         }
 
-        function updateStatus(connected) {
+        // Update connection status
+        function updateStatus(connected, message = '') {
             isConnected = connected;
             if (connected) {
-                status.textContent = 'Connected to server';
+                status.textContent = message || 'Connected to server';
                 status.className = 'status connected';
-                startButton.disabled = false;
-                defaultButton.disabled = false;
+                createStreamBtn.disabled = false;
             } else {
-                status.textContent = 'Disconnected from server';
+                status.textContent = message || 'Disconnected from server';
                 status.className = 'status disconnected';
-                startButton.disabled = true;
-                defaultButton.disabled = true;
+                createStreamBtn.disabled = true;
+                destroyStreamBtn.disabled = true;
             }
         }
 
-        function startStream() {
+        // API Functions
+        async function apiCall(endpoint, options = {}) {
+            try {
+                const response = await fetch(`/api${endpoint}`, {
+                    headers: {
+                        'Content-Type': 'application/json',
+                        ...options.headers
+                    },
+                    ...options
+                });
+                
+                const data = await response.json();
+                
+                if (!response.ok) {
+                    throw new Error(data.error || `HTTP ${response.status}`);
+                }
+                
+                return data;
+            } catch (error) {
+                log(`API Error: ${error.message}`, 'error');
+                throw error;
+            }
+        }
+
+        // Test API endpoints
+        async function testHealthAPI() {
+            try {
+                const health = await apiCall('/health');
+                document.getElementById('apiResults').innerHTML = 
+                    `<div class="test-result test-success">Health API: ${JSON.stringify(health, null, 2)}</div>`;
+                log('Health API test successful', 'success');
+                updateStats(health.stats);
+            } catch (error) {
+                document.getElementById('apiResults').innerHTML = 
+                    `<div class="test-result test-error">Health API Error: ${error.message}</div>`;
+            }
+        }
+
+        async function testListStreams() {
+            try {
+                const streams = await apiCall('/streams');
+                document.getElementById('apiResults').innerHTML = 
+                    `<div class="test-result test-success">Streams API: ${JSON.stringify(streams, null, 2)}</div>`;
+                log(`Found ${streams.total} active streams`, 'success');
+            } catch (error) {
+                document.getElementById('apiResults').innerHTML = 
+                    `<div class="test-result test-error">Streams API Error: ${error.message}</div>`;
+            }
+        }
+
+        // Stream management
+        async function createStream() {
             const magnetLink = magnetInput.value.trim();
             if (!magnetLink) {
-                log('ERROR: Please enter a magnet link or hash.');
+                log('Please enter a magnet link', 'error');
                 return;
             }
-            
-            if (!isConnected) {
-                log('ERROR: Not connected to server. Please wait for connection.');
+
+            if (!clientId) {
+                log('Client ID not available. Please wait for connection.', 'error');
                 return;
             }
-            
-            log(`Requesting stream for: ${magnetLink.substring(0, 50)}...`);
-            ws.send(JSON.stringify({ type: 'setMagnetLink', magnetLink }));
+
+            try {
+                updateStatus(true, 'Creating stream...');
+                status.className = 'status loading';
+                
+                log(`Creating stream for magnet: ${magnetLink.substring(0, 50)}...`);
+                
+                const result = await apiCall('/streams', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        magnetLink: magnetLink,
+                        clientId: clientId
+                    })
+                });
+
+                currentStreamId = result.streamId;
+                log(`Stream created with ID: ${currentStreamId}`, 'success');
+                
+                // Start polling for stream status
+                pollStreamStatus();
+                
+                createStreamBtn.disabled = true;
+                destroyStreamBtn.disabled = false;
+                
+                updateStreamInfo({
+                    id: currentStreamId,
+                    status: 'initializing',
+                    metadata: {}
+                });
+                
+            } catch (error) {
+                log(`Failed to create stream: ${error.message}`, 'error');
+                updateStatus(true, 'Connected to server');
+            }
         }
 
-        function startDefault() {
-            if (!isConnected) {
-                log('ERROR: Not connected to server. Please wait for connection.');
+        async function destroyCurrentStream() {
+            if (!currentStreamId) {
+                log('No active stream to destroy', 'error');
                 return;
             }
+
+            try {
+                await apiCall(`/streams/${currentStreamId}`, {
+                    method: 'DELETE'
+                });
+                
+                log(`Stream ${currentStreamId} destroyed`, 'success');
+                
+                currentStreamId = null;
+                currentStream = null;
+                videoPlayer.src = '';
+                
+                createStreamBtn.disabled = false;
+                destroyStreamBtn.disabled = true;
+                
+                streamInfo.classList.remove('visible');
+                
+            } catch (error) {
+                log(`Failed to destroy stream: ${error.message}`, 'error');
+            }
+        }
+
+        // Stream status polling
+        async function pollStreamStatus() {
+            if (!currentStreamId) return;
+
+            try {
+                const stream = await apiCall(`/streams/${currentStreamId}`);
+                currentStream = stream;
+                
+                updateStreamInfo(stream);
+                
+                if (stream.status === 'ready' && stream.metadata.filename) {
+                    log(`Stream ready! File: ${stream.metadata.filename}`, 'success');
+                    startVideoPlayback();
+                    updateStatus(true, 'Stream ready');
+                } else if (stream.status === 'error') {
+                    log(`Stream error: ${stream.error || 'Unknown error'}`, 'error');
+                    updateStatus(true, 'Stream failed');
+                } else {
+                    // Continue polling
+                    setTimeout(pollStreamStatus, 2000);
+                }
+                
+            } catch (error) {
+                log(`Failed to get stream status: ${error.message}`, 'error');
+                setTimeout(pollStreamStatus, 5000); // Retry with longer delay
+            }
+        }
+
+        // Update stream info display
+        function updateStreamInfo(stream) {
+            document.getElementById('currentStreamId').textContent = stream.streamId || stream.id;
+            document.getElementById('streamStatus').textContent = stream.status;
+            document.getElementById('streamFilename').textContent = stream.metadata?.filename || '-';
+            document.getElementById('streamFileSize').textContent = 
+                stream.metadata?.size ? `${(stream.metadata.size / 1024 / 1024).toFixed(2)} MB` : '-';
             
-            log('Requesting default stream...');
-            ws.send(JSON.stringify({ type: 'startDefault' }));
+            streamInfo.classList.add('visible');
         }
 
-        function initializePlayer(streamUrl) {
-            const fullUrl = `http://${window.location.hostname}:6543${streamUrl}`;
-            log(`Setting player source to: ${fullUrl}`);
-            videoPlayer.src = fullUrl;
-            videoPlayer.play().catch(e => log(`Playback was prevented: ${e.message}`));
+        // Start video playback
+        function startVideoPlayback() {
+            if (!currentStreamId) return;
+            
+            const streamUrl = `/stream/${currentStreamId}`;
+            log(`Starting video playback: ${streamUrl}`);
+            
+            videoPlayer.src = streamUrl;
+            videoPlayer.play().catch(e => {
+                log(`Playback error: ${e.message}`, 'error');
+            });
         }
 
+        // Update server stats
+        function updateStats(stats) {
+            if (stats) {
+                document.getElementById('activeStreams').textContent = stats.activeStreams || 0;
+                document.getElementById('connectedClients').textContent = stats.connectedClients || 0;
+                document.getElementById('uptime').textContent = Math.round((stats.uptime || 0) / 60);
+            }
+        }
+
+        // Refresh stats manually
+        async function refreshStats() {
+            try {
+                const health = await apiCall('/health');
+                updateStats(health.stats);
+                log('Stats refreshed', 'success');
+            } catch (error) {
+                log(`Failed to refresh stats: ${error.message}`, 'error');
+            }
+        }
+
+        // WebSocket connection
         function connectWebSocket() {
             ws = new WebSocket(`ws://${window.location.hostname}:6543`);
 
             ws.onopen = () => {
-                log('WebSocket connection established.');
+                log('WebSocket connection established', 'success');
                 updateStatus(true);
             };
 
             ws.onclose = () => {
-                log('WebSocket connection closed. Attempting to reconnect...');
+                log('WebSocket connection closed. Attempting to reconnect...', 'error');
                 updateStatus(false);
-                // Attempt to reconnect after 3 seconds
                 setTimeout(connectWebSocket, 3000);
             };
 
             ws.onerror = (err) => {
-                log('WebSocket error. See console for details.');
+                log('WebSocket error occurred', 'error');
                 console.error('WebSocket error:', err);
-                updateStatus(false);
             };
 
             ws.onmessage = (event) => {
                 try {
                     const msg = JSON.parse(event.data);
-                    log(`Received message: ${msg.type}`);
-
-                    if (msg.type === 'streamReady' && msg.url) {
-                        initializePlayer(msg.url);
-                    } else if (msg.type === 'error') {
-                        log(`SERVER ERROR: ${msg.message}`);
+                    
+                    switch (msg.type) {
+                        case 'connected':
+                            clientId = msg.clientId;
+                            log(`Connected with client ID: ${clientId}`, 'success');
+                            break;
+                            
+                        case 'stream_ready':
+                            log(`Stream ready notification: ${JSON.stringify(msg.data)}`, 'success');
+                            if (msg.streamId === currentStreamId) {
+                                pollStreamStatus(); // Refresh status
+                            }
+                            break;
+                            
+                        case 'stream_error':
+                            log(`Stream error notification: ${msg.data?.error}`, 'error');
+                            break;
+                            
+                        case 'stream_destroyed':
+                            log(`Stream destroyed notification: ${msg.streamId}`, 'info');
+                            break;
+                            
+                        default:
+                            log(`Unknown message type: ${msg.type}`, 'info');
                     }
                 } catch (e) {
-                    log('Error parsing server message.');
-                    console.error('Parse error:', e);
+                    log('Error parsing WebSocket message', 'error');
                 }
             };
         }
 
-        // Start the connection when the page loads
-        connectWebSocket();
+        // Initialize
+        document.addEventListener('DOMContentLoaded', () => {
+            log('Initializing Multi-Platform Video Streamer');
+            connectWebSocket();
+            
+            // Auto-refresh stats every 30 seconds
+            setInterval(refreshStats, 30000);
+        });
+
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', () => {
+            if (currentStreamId) {
+                destroyCurrentStream();
+            }
+        });
     </script>
 </body>
 </html>

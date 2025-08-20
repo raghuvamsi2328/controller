@@ -1,5 +1,5 @@
 {
-  "name": "torrentstreamer",
+  "name": "torrent-streaming-api",
   "version": "1.0.0",
   "description": "stream torrents over ws using torren hash",
   "main": "index.js",
