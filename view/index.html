@@ -239,6 +239,16 @@
             display: flex;
             justify-content: space-between;
         }
+
+        .engine-selection {
+            margin: 10px 0;
+            padding: 5px 0;
+        }
+        .engine-selection select {
+            padding: 5px 10px;
+            border-radius: 4px;
+            border: 1px solid #ddd;
+        }
     </style>
 </head>
 <body>
@@ -276,6 +286,13 @@
         <div class="input-section">
             <input type="text" id="magnetInput" placeholder="Enter magnet link" 
                    value="magnet:?xt=urn:btih:dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c&dn=Big+Buck+Bunny">
+            <div class="engine-selection">
+                <label>Engine: </label>
+                <select id="engineSelect">
+                    <option value="webtorrent">WebTorrent (Better for MKV)</option>
+                    <option value="peerflix">Peerflix (Fallback)</option>
+                </select>
+            </div>
             <div class="actions">
                 <button id="createStreamBtn" onclick="createStream()" disabled>Create Stream</button>
                 <button id="destroyStreamBtn" onclick="destroyCurrentStream()" disabled>Destroy Stream</button>
@@ -520,11 +537,16 @@
                 
                 log(`Creating stream for magnet: ${magnetLink.substring(0, 50)}...`);
                 
+                // Get selected engine
+                const engineType = document.getElementById('engineSelect').value;
+                log(`Using ${engineType} engine`, 'info');
+                
                 // Send stream creation request via WebSocket
                 ws.send(JSON.stringify({
                     type: 'create_stream',
                     magnetLink: magnetLink,
-                    clientId: clientId
+                    clientId: clientId,
+                    engine: engineType // Send engine preference to server
                 }));
 
                 createStreamBtn.disabled = true;
@@ -533,6 +555,72 @@
                 log(`Failed to send stream creation request: ${error.message}`, 'error');
                 updateStatus(true, 'Connected to server');
             }
+        }
+
+        // Update the startVideoPlayback function
+        function startVideoPlayback() {
+            if (!currentStreamId) return;
+            
+            const streamUrl = `/stream/${currentStreamId}`;
+            log(`Starting optimized video playback: ${streamUrl}`, 'info');
+            
+            // Apply network-aware optimizations
+            const video = videoPlayer;
+            
+            // Clear any previous source and errors
+            video.innerHTML = '';
+            video.removeAttribute('src');
+            video.load();
+            
+            // Get file container/extension
+            const fileContainer = currentStream?.metadata?.container || '.mp4';
+            const isLargeFile = (currentStream?.metadata?.size || 0) > 500 * 1024 * 1024; // > 500MB
+            const isMkv = fileContainer === '.mkv';
+            
+            log(`File type: ${fileContainer}, Size: ${isLargeFile ? 'Large' : 'Standard'}`, 'info');
+            
+            // Apply special handling based on file type
+            if (isMkv) {
+                optimizeForMkv(video);
+            }
+            
+            if (isLargeFile) {
+                optimizeForLargeFile(video);
+            }
+            
+            // Set MIME type based on container
+            const mimeType = mimeTypes[fileContainer] || 'video/mp4';
+            log(`Using MIME type: ${mimeType}`, 'info');
+            
+            // Set source with proper MIME type
+            const source = document.createElement('source');
+            source.src = streamUrl;
+            source.type = mimeType;
+            video.appendChild(source);
+            
+            // Add fallback text
+            video.appendChild(document.createTextNode('Your browser does not support the video tag.'));
+            
+            // Handle video events for better UX
+            video.addEventListener('loadstart', () => {
+                log('Video loading started', 'info');
+                document.getElementById('videoState').textContent = 'Loading';
+            }, { once: true });
+            
+            video.addEventListener('canplay', () => {
+                log('Video can start playing now', 'success');
+                document.getElementById('videoState').textContent = 'Ready';
+                
+                // Auto-play with error handling
+                video.play()
+                    .then(() => log('Playback started successfully', 'success'))
+                    .catch(e => {
+                        log(`Autoplay prevented: ${e.message}. Click play button to start.`, 'warning');
+                    });
+            }, { once: true });
+            
+            // Load the video
+            video.load();
         }
 
         async function destroyCurrentStream() {
@@ -629,32 +717,60 @@
             // Apply network-aware optimizations
             const video = videoPlayer;
             
-            // Set quality-based preload
-            setStreamingQuality(streamingQuality);
+            // Clear any previous source and errors
+            video.innerHTML = '';
+            video.removeAttribute('src');
+            video.load();
             
-            // Add network-specific optimizations
-            if (networkStats.connectionType === 'slow-2g' || networkStats.connectionType === '2g') {
-                video.preload = 'none';
-                log('Slow connection detected: Minimal preloading', 'info');
+            // Get file container/extension
+            const fileContainer = currentStream?.metadata?.container || '.mp4';
+            const isLargeFile = (currentStream?.metadata?.size || 0) > 500 * 1024 * 1024; // > 500MB
+            const isMkv = fileContainer === '.mkv';
+            
+            log(`File type: ${fileContainer}, Size: ${isLargeFile ? 'Large' : 'Standard'}`, 'info');
+            
+            // Apply special handling based on file type
+            if (isMkv) {
+                optimizeForMkv(video);
             }
             
-            video.src = streamUrl;
+            if (isLargeFile) {
+                optimizeForLargeFile(video);
+            }
             
-            // Enhanced error handling with retry logic
-            video.play().catch(e => {
-                log(`Playback error: ${e.message}`, 'error');
+            // Set MIME type based on container
+            const mimeType = mimeTypes[fileContainer] || 'video/mp4';
+            log(`Using MIME type: ${mimeType}`, 'info');
+            
+            // Set source with proper MIME type
+            const source = document.createElement('source');
+            source.src = streamUrl;
+            source.type = mimeType;
+            video.appendChild(source);
+            
+            // Add fallback text
+            video.appendChild(document.createTextNode('Your browser does not support the video tag.'));
+            
+            // Handle video events for better UX
+            video.addEventListener('loadstart', () => {
+                log('Video loading started', 'info');
+                document.getElementById('videoState').textContent = 'Loading';
+            }, { once: true });
+            
+            video.addEventListener('canplay', () => {
+                log('Video can start playing now', 'success');
+                document.getElementById('videoState').textContent = 'Ready';
                 
-                // Retry with different approach for MKV files
-                if (currentStream?.metadata?.container === '.mkv') {
-                    log('MKV detected: Retrying with different headers', 'info');
-                    setTimeout(() => {
-                        video.load();
-                        video.play().catch(retryError => {
-                            log(`MKV retry failed: ${retryError.message}`, 'error');
-                        });
-                    }, 2000);
-                }
-            });
+                // Auto-play with error handling
+                video.play()
+                    .then(() => log('Playback started successfully', 'success'))
+                    .catch(e => {
+                        log(`Autoplay prevented: ${e.message}. Click play button to start.`, 'warning');
+                    });
+            }, { once: true });
+            
+            // Load the video
+            video.load();
         }
 
         // Update server stats
@@ -884,18 +1000,83 @@
             });
             
             video.addEventListener('error', (e) => {
-                log(`Video error: ${e.message || 'Unknown error'}`, 'error');
+                const errorCode = video.error ? video.error.code : 0;
+                const errorMsg = video.error ? video.error.message : 'Unknown error';
+                log(`Video error (${errorCode}): ${errorMsg}`, 'error');
                 document.getElementById('videoState').textContent = 'Error';
-            });
-            
-            video.addEventListener('loadstart', () => {
-                log('Video load started', 'info');
-                document.getElementById('videoState').textContent = 'Loading';
-            });
-            
-            video.addEventListener('canplay', () => {
-                log('Video can start playing', 'success');
-                document.getElementById('videoState').textContent = 'Ready';
+                
+                // Attempt recovery based on error type
+                switch(errorCode) {
+                    case MediaError.MEDIA_ERR_ABORTED:
+                        log('Video playback aborted by user', 'warning');
+                        break;
+                        
+                    case MediaError.MEDIA_ERR_NETWORK:
+                        log('Network error occurred, retrying...', 'warning');
+                        setTimeout(() => {
+                            video.load();
+                            video.play().catch(e => log('Retry failed', 'error'));
+                        }, 3000);
+                        break;
+                        
+                    case MediaError.MEDIA_ERR_DECODE:
+                        log('Media decode error - possible codec issue', 'error');
+                        if (currentStream?.metadata?.container === '.mkv') {
+                            log('Trying MKV-specific recovery...', 'info');
+                            optimizeForMkv(video);
+                            video.load();
+                        }
+                        break;
+                        
+                    case MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED:
+                        log('Format or MIME type not supported', 'error');
+                        // Try with a different MIME type
+                        const container = currentStream?.metadata?.container || '.mp4';
+                        const alternativeMimeTypes = {
+                            '.mkv': ['video/webm', 'video/x-matroska', 'application/octet-stream'],
+                            '.mp4': ['video/mp4', 'video/x-mp4', 'application/octet-stream'],
+                            '.avi': ['video/x-msvideo', 'video/avi', 'application/octet-stream']
+                        };
+                        
+                        const alternatives = alternativeMimeTypes[container] || ['application/octet-stream'];
+                        log(`Trying alternative MIME types: ${alternatives.join(', ')}`, 'info');
+                        
+                        // Try each alternative
+                        let attemptIndex = 0;
+                        function tryAlternative() {
+                            if (attemptIndex >= alternatives.length) {
+                                log('All recovery attempts failed', 'error');
+                                return;
+                            }
+                            
+                            const mimeType = alternatives[attemptIndex++];
+                            log(`Trying MIME type: ${mimeType}`, 'info');
+                            
+                            video.innerHTML = '';
+                            const source = document.createElement('source');
+                            source.src = `/stream/${currentStreamId}`;
+                            source.type = mimeType;
+                            video.appendChild(source);
+                            video.load();
+                            
+                            // If this one fails too, try next alternative
+                            const errorHandler = function() {
+                                video.removeEventListener('error', errorHandler);
+                                tryAlternative();
+                            };
+                            video.addEventListener('error', errorHandler);
+                            
+                            // If it starts playing, success
+                            video.addEventListener('canplay', function() {
+                                video.removeEventListener('error', errorHandler);
+                                log(`Recovery successful with MIME type: ${mimeType}`, 'success');
+                            }, { once: true });
+                        }
+                        
+                        // Start the recovery process
+                        tryAlternative();
+                        break;
+                }
             });
         }
 
@@ -1085,6 +1266,108 @@
             } catch (error) {
                 log(`Failed to destroy stream: ${error.message}`, 'error');
             }
+        }
+
+        // Enhanced video player settings for different file formats
+        const mimeTypes = {
+            '.mp4': 'video/mp4',
+            '.mkv': 'video/x-matroska',
+            '.avi': 'video/x-msvideo',
+            '.webm': 'video/webm',
+            '.mov': 'video/quicktime',
+            '.ts': 'video/mp2t',
+            '.m4v': 'video/mp4',
+            '.3gp': 'video/3gpp',
+            '.flv': 'video/x-flv',
+            '.wmv': 'video/x-ms-wmv',
+        };
+
+        // Check for MediaSource API support
+        const mediaSourceSupported = 'MediaSource' in window || 'WebKitMediaSource' in window;
+        log(`MediaSource API ${mediaSourceSupported ? 'supported' : 'not supported'}`, 'info');
+
+        // Special handling for MKV playback
+        function optimizeForMkv(videoElement) {
+            log('Optimizing for MKV playback', 'info');
+            
+            // Set higher buffer size for MKV
+            videoElement.preload = 'auto';
+            
+            // Try with different mimetypes if needed
+            const retryWithDifferentMimeType = () => {
+                log('MKV initial load failed, retrying with alternative MIME type', 'warning');
+                const streamUrl = `/stream/${currentStreamId}`;
+                
+                // Force alternative mimetype approach
+                videoElement.innerHTML = ''; // Clear any error state
+                videoElement.src = streamUrl;
+                
+                // Add specific request headers
+                try {
+                    // This isn't natively supported, but can be used with extensions
+                    // or as a hint for the server about browser capabilities
+                    videoElement.setRequestHeader = {
+                        'X-Content-Type-Options': 'nosniff',
+                        'Accept': 'video/webm, video/x-matroska, */*'
+                    };
+                } catch (e) {
+                    log('Could not set custom headers for MKV', 'warning');
+                }
+            };
+            
+            // Listen for errors specific to MKV
+            videoElement.addEventListener('error', function(e) {
+                if (currentStream?.metadata?.container === '.mkv') {
+                    log('MKV playback error, attempting recovery', 'warning');
+                    retryWithDifferentMimeType();
+                }
+            }, { once: true });
+        }
+
+        // Optimize for large files
+        function optimizeForLargeFile(videoElement) {
+            log('Optimizing for large file playback', 'info');
+            
+            // Reduce initial quality to start playback faster
+            setStreamingQuality('fast');
+            
+            // Increase buffer size but limit initial load
+            videoElement.preload = 'auto';
+            
+            // Disable automatic quality switching until stable
+            videoElement.autoQualitySwitchingEnabled = false;
+            
+            // Monitor buffering more aggressively
+            let bufferingDetected = false;
+            const bufferCheckInterval = setInterval(() => {
+                if (!videoElement.paused) {
+                    if (videoElement.buffered.length > 0) {
+                        const bufferEnd = videoElement.buffered.end(0);
+                        const bufferAhead = bufferEnd - videoElement.currentTime;
+                        
+                        // If buffer is getting low and we're playing, try to build buffer
+                        if (bufferAhead < 10 && !bufferingDetected) {
+                            bufferingDetected = true;
+                            log('Buffer running low, slowing playback to build buffer', 'warning');
+                            
+                            // Optional: Reduce playback rate slightly to build buffer
+                            const originalRate = videoElement.playbackRate;
+                            videoElement.playbackRate = Math.max(0.9, originalRate - 0.1);
+                            
+                            // Restore normal playback once buffer is healthy
+                            setTimeout(() => {
+                                videoElement.playbackRate = originalRate;
+                                bufferingDetected = false;
+                            }, 5000);
+                        }
+                    }
+                }
+            }, 2000);
+            
+            // Clean up interval when video ends or is destroyed
+            videoElement.addEventListener('ended', () => clearInterval(bufferCheckInterval), { once: true });
+            document.getElementById('destroyStreamBtn').addEventListener('click', 
+                () => clearInterval(bufferCheckInterval), { once: true });
         }
     </script>
 </body>

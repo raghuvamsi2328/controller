@@ -8,20 +8,20 @@ import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import { WebSocketServer } from 'ws';
 import peerflix from 'peerflix';
+import WebTorrent from 'webtorrent';
 import { v4 as uuidv4 } from 'uuid';
 import fs from 'fs';
 
-// --- Configuration (Remove timeout settings) ---
+// --- Configuration ---
 const CONFIG = {
     PORT: process.env.PORT || 6543,
     HOST: process.env.HOST || '0.0.0.0',
     MAX_CONCURRENT_STREAMS: parseInt(process.env.MAX_STREAMS) || 10,
     MAX_STREAMS_PER_CLIENT: 2,
-    CLEANUP_INTERVAL: 5 * 60 * 1000, // Only for logging/monitoring, not cleanup
-    // REMOVED: STREAM_INACTIVE_TIMEOUT
-    // REMOVED: CONNECTION_TIMEOUT
+    CLEANUP_INTERVAL: 5 * 60 * 1000,
     TEMP_DIR: process.env.TEMP_DIR || '/tmp/torrent-streams',
     MAX_DISK_USAGE: 5 * 1024 * 1024 * 1024,
+    DEFAULT_ENGINE: process.env.TORRENT_ENGINE || 'webtorrent', // 'webtorrent' or 'peerflix'
 };
 
 // --- Setup ---
@@ -173,7 +173,7 @@ class StreamManager {
         };
     }
 
-    createStream(magnetLink, clientId) {
+    createStream(magnetLink, clientId, engineType = CONFIG.DEFAULT_ENGINE) {
         // Check if stream creation is allowed
         const canCreate = this.canCreateStream(clientId);
         if (!canCreate.allowed) {
@@ -189,41 +189,66 @@ class StreamManager {
         const maxLoad = CONFIG.MAX_CONCURRENT_STREAMS;
         const loadPercentage = currentLoad / maxLoad;
         
-        // Dynamic connection scaling:
-        // - Low load (0-30%): 50 connections (fast)
-        // - Medium load (30-70%): 25 connections (balanced)
-        // - High load (70-100%): 10 connections (conservative)
+        // Dynamic connection scaling
         let connectionLimit;
         if (loadPercentage <= 0.3) {
-            connectionLimit = 50; // Fast streaming when server has capacity
+            connectionLimit = 50; 
         } else if (loadPercentage <= 0.7) {
-            connectionLimit = 25; // Balanced performance
+            connectionLimit = 25;
         } else {
-            connectionLimit = 10; // Conservative when under heavy load
+            connectionLimit = 10;
         }
         
-        console.log(`🚀 [${streamId}] Creating stream for client ${clientId}`);
+        console.log(`🚀 [${streamId}] Creating stream for client ${clientId} using ${engineType}`);
         console.log(`📊 Current load: ${currentLoad}/${maxLoad} (${(loadPercentage * 100).toFixed(1)}%) - Using ${connectionLimit} connections`);
         
-        const engine = peerflix(magnetLink, {
-            connections: connectionLimit, // Dynamic based on server load
-            uploads: 0, // Still disable uploads to save bandwidth
-            path: streamPath,
-            quiet: false,
-            tracker: true,
-            dht: false,
-            webSeeds: true,
-            // Additional performance options
-            blocklist: false, // Disable IP blocklist for more peers
-            verify: false,    // Skip hash verification for faster startup
-            // Download strategy for streaming
-            strategy: 'sequential' // or 'sequential' for streaming
-        });
+        let engine;
+        let engineInstance;
+        
+        if (engineType === 'webtorrent') {
+            // Create WebTorrent client
+            engine = new WebTorrent();
+            
+            // WebTorrent add options
+            const options = {
+                path: streamPath,
+                announce: [], // Will use default trackers
+            };
+            
+            // Start torrent - WebTorrent style
+            engineInstance = 'pending'; // We'll store the torrent instance when ready
+            
+            // WebTorrent handles adding torrents differently
+            engine.add(magnetLink, options, (torrent) => {
+                engineInstance = torrent;
+                // Signal that the torrent is ready
+                if (streamData.onWebTorrentReady) {
+                    streamData.onWebTorrentReady(torrent);
+                }
+            });
+        } else {
+            // Fallback to peerflix
+            engine = peerflix(magnetLink, {
+                connections: connectionLimit,
+                uploads: 0,
+                path: streamPath,
+                quiet: false,
+                tracker: true,
+                dht: false,
+                webSeeds: true,
+                blocklist: false,
+                verify: false,
+                strategy: 'sequential'
+            });
+            engineInstance = engine; // For peerflix, engine is the instance
+        }
 
         const streamData = {
             id: streamId,
             clientId,
             engine,
+            engineInstance,
+            engineType,
             magnetLink,
             status: 'initializing',
             createdAt: timestamp,
@@ -247,7 +272,7 @@ class StreamManager {
     }
 
     setupEngineEvents(streamData) {
-        const { id, engine } = streamData;
+        const { id, engine, engineType } = streamData;
 
         // Initialize torrent stats with safe defaults
         streamData.torrentStats = {
@@ -264,104 +289,172 @@ class StreamManager {
             health: 'initializing'
         };
 
-        engine.on('ready', () => {
-            try {
-                console.log(`✅ [${id}] Engine ready`);
-                
-                // Safe access to engine properties
-                const filesCount = engine.files ? engine.files.length : 0;
-                const infoHash = engine.torrent ? engine.torrent.infoHash : 'unknown';
-                const totalSize = engine.torrent ? engine.torrent.length : 0;
-                
-                console.log(`📁 [${id}] Total files in torrent: ${filesCount}`);
-                console.log(`🌐 [${id}] Torrent info hash: ${infoHash}`);
-                console.log(`📦 [${id}] Total size: ${(totalSize / 1024 / 1024).toFixed(2)}MB`);
-                
-                // Safely log all files
-                if (engine.files && Array.isArray(engine.files)) {
-                    engine.files.forEach((file, index) => {
-                        const fileName = file && file.name ? file.name : `File ${index}`;
-                        const fileSize = file && file.length ? file.length : 0;
-                        console.log(`📄 [${id}] File ${index}: ${fileName} (${(fileSize / 1024 / 1024).toFixed(2)}MB)`);
-                    });
-                }
-                
-                // Start torrent monitoring
-                this.startTorrentMonitoring(streamData);
-                
-                const videoFile = this.findBestVideoFile(engine.files || [], id);
+        if (engineType === 'webtorrent') {
+            // WebTorrent specific setup
+            
+            // We need to handle the ready event differently for WebTorrent
+            streamData.onWebTorrentReady = (torrent) => {
+                try {
+                    console.log(`✅ [${id}] WebTorrent engine ready`);
+                    
+                    // Basic torrent info
+                    const filesCount = torrent.files ? torrent.files.length : 0;
+                    const infoHash = torrent.infoHash || 'unknown';
+                    const totalSize = torrent.length || 0;
+                    
+                    console.log(`📁 [${id}] Total files in torrent: ${filesCount}`);
+                    console.log(`🌐 [${id}] Torrent info hash: ${infoHash}`);
+                    console.log(`📦 [${id}] Total size: ${(totalSize / 1024 / 1024).toFixed(2)}MB`);
+                    
+                    // Log all files
+                    if (torrent.files && Array.isArray(torrent.files)) {
+                        torrent.files.forEach((file, index) => {
+                            const fileName = file && file.name ? file.name : `File ${index}`;
+                            const fileSize = file && file.length ? file.length : 0;
+                            console.log(`📄 [${id}] File ${index}: ${fileName} (${(fileSize / 1024 / 1024).toFixed(2)}MB)`);
+                        });
+                    }
+                    
+                    // Start torrent monitoring
+                    this.startTorrentMonitoring(streamData);
+                    
+                    // Find best video file (WebTorrent file format is compatible)
+                    const videoFile = this.findBestVideoFile(torrent.files || [], id);
 
-                if (!videoFile) {
+                    if (!videoFile) {
+                        streamData.status = 'error';
+                        streamData.error = 'No suitable video file found';
+                        console.log(`❌ [${id}] No video file found`);
+                        this.notifyClients(id, 'stream_error', { error: 'No suitable video file found' });
+                        return;
+                    }
+
+                    streamData.status = 'ready';
+                    streamData.videoFile = videoFile;
+                    streamData.metadata = {
+                        filename: videoFile.name || 'unknown',
+                        size: videoFile.length || 0,
+                        duration: null,
+                        bitrate: null,
+                        container: path.extname(videoFile.name || '').toLowerCase(),
+                        isInFolder: (videoFile.name || '').includes('/') || (videoFile.name || '').includes('\\'),
+                        torrentHash: infoHash,
+                        totalTorrentSize: totalSize
+                    };
+
+                    console.log(`✅ [${id}] Video ready: ${videoFile.name} (${(videoFile.length / 1024 / 1024).toFixed(2)} MB)`);
+                    console.log(`📦 [${id}] Container: ${streamData.metadata.container}, In folder: ${streamData.metadata.isInFolder}`);
+                    
+                    this.notifyClients(id, 'stream_ready', streamData.metadata);
+                } catch (readyError) {
+                    console.error(`❌ [${id}] Error in WebTorrent ready handler: ${readyError.message}`);
                     streamData.status = 'error';
-                    streamData.error = 'No suitable video file found';
-                    console.log(`❌ [${id}] No video file found`);
-                    this.notifyClients(id, 'stream_error', { error: 'No suitable video file found' });
-                    return;
+                    streamData.error = `WebTorrent ready handler error: ${readyError.message}`;
+                    this.notifyClients(id, 'stream_error', { error: streamData.error });
                 }
+            };
 
-                streamData.status = 'ready';
-                streamData.videoFile = videoFile;
-                streamData.metadata = {
-                    filename: videoFile.name || 'unknown',
-                    size: videoFile.length || 0,
-                    duration: null,
-                    bitrate: null,
-                    container: path.extname(videoFile.name || '').toLowerCase(),
-                    isInFolder: (videoFile.name || '').includes('/') || (videoFile.name || '').includes('\\'),
-                    torrentHash: infoHash,
-                    totalTorrentSize: totalSize
-                };
-
-                console.log(`✅ [${id}] Video ready: ${videoFile.name} (${(videoFile.length / 1024 / 1024).toFixed(2)} MB)`);
-                console.log(`📦 [${id}] Container: ${streamData.metadata.container}, In folder: ${streamData.metadata.isInFolder}`);
-                
-                this.notifyClients(id, 'stream_ready', streamData.metadata);
-                
-            } catch (readyError) {
-                console.error(`❌ [${id}] Error in ready handler: ${readyError.message}`);
+            // WebTorrent events
+            streamData.engine.on('error', (err) => {
+                console.error(`❌ [${id}] WebTorrent error:`, err.message);
                 streamData.status = 'error';
-                streamData.error = `Ready handler error: ${readyError.message}`;
-                this.notifyClients(id, 'stream_error', { error: streamData.error });
-            }
-        });
+                streamData.error = err.message;
+                streamData.torrentStats.health = 'error';
+                this.notifyClients(id, 'stream_error', { error: err.message });
+            });
+            
+        } else {
+            // Original peerflix event handling
+            engine.on('ready', () => {
+                try {
+                    console.log(`✅ [${id}] Peerflix engine ready`);
+                    
+                    // Safe access to engine properties
+                    const filesCount = engine.files ? engine.files.length : 0;
+                    const infoHash = engine.torrent ? engine.torrent.infoHash : 'unknown';
+                    const totalSize = engine.torrent ? engine.torrent.length : 0;
+                    
+                    console.log(`📁 [${id}] Total files in torrent: ${filesCount}`);
+                    console.log(`🌐 [${id}] Torrent info hash: ${infoHash}`);
+                    console.log(`📦 [${id}] Total size: ${(totalSize / 1024 / 1024).toFixed(2)}MB`);
+                    
+                    // Safely log all files
+                    if (engine.files && Array.isArray(engine.files)) {
+                        engine.files.forEach((file, index) => {
+                            const fileName = file && file.name ? file.name : `File ${index}`;
+                            const fileSize = file && file.length ? file.length : 0;
+                            console.log(`📄 [${id}] File ${index}: ${fileName} (${(fileSize / 1024 / 1024).toFixed(2)}MB)`);
+                        });
+                    }
+                    
+                    // Start torrent monitoring
+                    this.startTorrentMonitoring(streamData);
+                    
+                    const videoFile = this.findBestVideoFile(engine.files || [], id);
 
-        // Enhanced download monitoring with error handling
-        engine.on('download', (pieceIndex) => {
-            try {
-                this.updateDiskUsage(streamData);
-                this.updateTorrentStats(streamData);
-            } catch (downloadError) {
-                console.error(`❌ [${id}] Error in download handler: ${downloadError.message}`);
-            }
-        });
+                    if (!videoFile) {
+                        streamData.status = 'error';
+                        streamData.error = 'No suitable video file found';
+                        console.log(`❌ [${id}] No video file found`);
+                        this.notifyClients(id, 'stream_error', { error: 'No suitable video file found' });
+                        return;
+                    }
 
-        // Enhanced peer connection events with error handling
-        engine.on('peer', (peer) => {
-            try {
-                const peerAddress = peer && peer.remoteAddress ? peer.remoteAddress : 'unknown';
-                console.log(`👥 [${id}] New peer connected: ${peerAddress}`);
-                this.updateTorrentStats(streamData);
-            } catch (peerError) {
-                console.error(`❌ [${id}] Error in peer handler: ${peerError.message}`);
-            }
-        });
+                    streamData.status = 'ready';
+                    streamData.videoFile = videoFile;
+                    streamData.metadata = {
+                        filename: videoFile.name || 'unknown',
+                        size: videoFile.length || 0,
+                        duration: null,
+                        bitrate: null,
+                        container: path.extname(videoFile.name || '').toLowerCase(),
+                        isInFolder: (videoFile.name || '').includes('/') || (videoFile.name || '').includes('\\'),
+                        torrentHash: infoHash,
+                        totalTorrentSize: totalSize
+                    };
 
-        // Enhanced upload events with error handling
-        engine.on('upload', (pieceIndex, offset, length) => {
-            try {
-                this.updateTorrentStats(streamData);
-            } catch (uploadError) {
-                console.error(`❌ [${id}] Error in upload handler: ${uploadError.message}`);
-            }
-        });
+                    console.log(`✅ [${id}] Video ready: ${videoFile.name} (${(videoFile.length / 1024 / 1024).toFixed(2)} MB)`);
+                    console.log(`📦 [${id}] Container: ${streamData.metadata.container}, In folder: ${streamData.metadata.isInFolder}`);
+                    
+                    this.notifyClients(id, 'stream_ready', streamData.metadata);
+                    
+                } catch (readyError) {
+                    console.error(`❌ [${id}] Error in peerflix ready handler: ${readyError.message}`);
+                    streamData.status = 'error';
+                    streamData.error = `Ready handler error: ${readyError.message}`;
+                    this.notifyClients(id, 'stream_error', { error: streamData.error });
+                }
+            });
 
-        engine.on('error', (err) => {
-            console.error(`❌ [${id}] Engine error:`, err.message);
-            streamData.status = 'error';
-            streamData.error = err.message;
-            streamData.torrentStats.health = 'error';
-            this.notifyClients(id, 'stream_error', { error: err.message });
-        });
+            // Enhanced download monitoring with error handling
+            engine.on('download', (pieceIndex) => {
+                try {
+                    this.updateDiskUsage(streamData);
+                    this.updateTorrentStats(streamData);
+                } catch (downloadError) {
+                    console.error(`❌ [${id}] Error in download handler: ${downloadError.message}`);
+                }
+            });
+
+            // Enhanced peer connection events with error handling
+            engine.on('peer', (peer) => {
+                try {
+                    const peerAddress = peer && peer.remoteAddress ? peer.remoteAddress : 'unknown';
+                    console.log(`👥 [${id}] New peer connected: ${peerAddress}`);
+                    this.updateTorrentStats(streamData);
+                } catch (peerError) {
+                    console.error(`❌ [${id}] Error in peer handler: ${peerError.message}`);
+                }
+            });
+
+            engine.on('error', (err) => {
+                console.error(`❌ [${id}] Engine error:`, err.message);
+                streamData.status = 'error';
+                streamData.error = err.message;
+                streamData.torrentStats.health = 'error';
+                this.notifyClients(id, 'stream_error', { error: err.message });
+            });
+        }
     }
 
     // Add comprehensive torrent monitoring
@@ -377,156 +470,215 @@ class StreamManager {
     }
 
     updateTorrentStats(streamData) {
-        const { engine } = streamData;
+        const { id, engine, engineType, engineInstance } = streamData;
         
-        // Enhanced null checking
-        if (!engine || !engine.swarm || !engine.torrent) {
-            console.log(`⚠️ [${streamData.id}] Engine/swarm/torrent not ready for stats update`);
-            return;
-        }
-
-        try {
-            const swarm = engine.swarm;
-            const torrent = engine.torrent;
-            
-            // Calculate basic stats with null checks
-            const downloaded = swarm.downloaded || 0;
-            const uploaded = swarm.uploaded || 0;
-            const totalLength = torrent.length || 0;
-            const progress = totalLength > 0 ? (downloaded / totalLength) * 100 : 0;
-            
-            // Enhanced peer statistics with null checking
-            const wires = swarm.wires || [];
-            const peers = Array.isArray(wires) ? wires : [];
-            
-            // Safely filter peers
-            let activePeers = 0;
-            let seeders = 0;
-            
-            peers.forEach(peer => {
-                try {
-                    // Check if peer is active (not choking)
-                    if (peer && !peer.peerChoking) {
-                        activePeers++;
-                    }
-                    
-                    // Check if peer is a seeder (has all pieces)
-                    if (peer && peer.peerPieces && peer.peerPieces.buffer) {
-                        // Safer seeder detection
-                        const bufferString = peer.peerPieces.buffer.toString('hex');
-                        if (bufferString && !bufferString.includes('00')) {
-                            seeders++;
-                        }
-                    }
-                } catch (peerError) {
-                    // Skip problematic peers
-                    console.log(`⚠️ [${streamData.id}] Skipping problematic peer: ${peerError.message}`);
-                }
-            });
-            
-            const leechers = Math.max(0, peers.length - seeders);
-            
-            // Speed calculations with null checks
-            const downloadSpeed = (swarm.downloadSpeed && typeof swarm.downloadSpeed === 'function') 
-                ? swarm.downloadSpeed() || 0 
-                : 0;
-            const uploadSpeed = (swarm.uploadSpeed && typeof swarm.uploadSpeed === 'function') 
-                ? swarm.uploadSpeed() || 0 
-                : 0;
-            
-            // ETA calculation
-            const remaining = Math.max(0, totalLength - downloaded);
-            const eta = downloadSpeed > 0 ? remaining / downloadSpeed : 0;
-            
-            // Health calculation (based on seeders/leechers ratio and download speed)
-            let health = 'unknown';
-            if (seeders > 10) {
-                health = 'excellent';
-            } else if (seeders > 5) {
-                health = 'good';
-            } else if (seeders > 1) {
-                health = 'fair';
-            } else if (seeders === 1) {
-                health = 'poor';
-            } else {
-                health = 'critical';
-            }
-            
-            // Enhanced pieces calculation with null checks
-            let piecesTotal = 0;
-            let piecesDownloaded = 0;
-            
+        // Different handling based on engine type
+        if (engineType === 'webtorrent') {
             try {
-                if (torrent.pieces && torrent.pieces.length) {
-                    piecesTotal = torrent.pieces.length;
+                // For WebTorrent, we need the torrent instance
+                const torrent = engineInstance;
+                
+                // Skip if torrent isn't ready yet
+                if (torrent === 'pending' || !torrent) {
+                    return;
                 }
                 
-                if (torrent.pieceLength && downloaded > 0) {
-                    piecesDownloaded = Math.floor(downloaded / torrent.pieceLength);
+                // Calculate basic stats
+                const downloaded = torrent.downloaded || 0;
+                const uploaded = torrent.uploaded || 0;
+                const totalLength = torrent.length || 0;
+                const progress = totalLength > 0 ? (downloaded / totalLength) * 100 : 0;
+                
+                // WebTorrent specific peer stats
+                const peers = torrent.wires || [];
+                const numPeers = torrent.numPeers || 0;
+                
+                // WebTorrent doesn't have direct seeders/leechers count
+                // We estimate based on which peers have the most pieces
+                let seeders = 0;
+                let leechers = 0;
+                
+                if (Array.isArray(peers)) {
+                    peers.forEach(wire => {
+                        if (wire && wire.have && wire.have.length === torrent.pieces.length) {
+                            seeders++;
+                        } else {
+                            leechers++;
+                        }
+                    });
                 }
-            } catch (piecesError) {
-                console.log(`⚠️ [${streamData.id}] Error calculating pieces: ${piecesError.message}`);
+                
+                // WebTorrent has downloadSpeed/uploadSpeed properties
+                const downloadSpeed = torrent.downloadSpeed || 0;
+                const uploadSpeed = torrent.uploadSpeed || 0;
+                
+                // ETA calculation
+                const remaining = totalLength - downloaded;
+                const eta = downloadSpeed > 0 ? remaining / downloadSpeed : 0;
+                
+                // Health calculation (based on seeders/leechers ratio and download speed)
+                let health = 'unknown';
+                if (seeders > 10) {
+                    health = 'excellent';
+                } else if (seeders > 5) {
+                    health = 'good';
+                } else if (seeders > 1) {
+                    health = 'fair';
+                } else if (seeders === 1) {
+                    health = 'poor';
+                } else {
+                    health = 'critical';
+                }
+                
+                // Update stats
+                streamData.torrentStats = {
+                    peers: numPeers,
+                    activePeers: numPeers, // WebTorrent doesn't distinguish
+                    seeders: seeders,
+                    leechers: leechers,
+                    downloadSpeed: downloadSpeed,
+                    uploadSpeed: uploadSpeed,
+                    downloaded: downloaded,
+                    uploaded: uploaded,
+                    progress: Math.round(progress * 100) / 100,
+                    ratio: downloaded > 0 ? uploaded / downloaded : 0,
+                    eta: eta,
+                    health: health,
+                    totalSize: totalLength,
+                    remaining: remaining,
+                    pieces: {
+                        total: torrent.pieces ? torrent.pieces.length : 0,
+                        downloaded: torrent.pieces ? torrent.pieces.filter(p => p).length : 0
+                    },
+                    bandwidth: {
+                        downloadSpeedFormatted: this.formatBytes(downloadSpeed) + '/s',
+                        uploadSpeedFormatted: this.formatBytes(uploadSpeed) + '/s'
+                    }
+                };
+                
+                // Log significant changes
+                if (streamData.lastLoggedProgress === undefined || 
+                    Math.abs(progress - streamData.lastLoggedProgress) >= 5) {
+                    console.log(`📊 [${streamData.id}] Progress: ${progress.toFixed(1)}%, Peers: ${numPeers} (${seeders}S/${leechers}L), Speed: ${this.formatBytes(downloadSpeed)}/s, Health: ${health}`);
+                    streamData.lastLoggedProgress = progress;
+                }
+                
+            } catch (error) {
+                console.error(`❌ [${id}] Error updating WebTorrent stats: ${error.message}`);
+                streamData.torrentStats.health = 'error';
             }
             
-            // Update stats safely
-            streamData.torrentStats = {
-                peers: peers.length || 0,
-                activePeers: activePeers || 0,
-                seeders: seeders || 0,
-                leechers: leechers || 0,
-                downloadSpeed: downloadSpeed || 0,
-                uploadSpeed: uploadSpeed || 0,
-                downloaded: downloaded || 0,
-                uploaded: uploaded || 0,
-                progress: Math.round((progress || 0) * 100) / 100,
-                ratio: downloaded > 0 ? (uploaded / downloaded) : 0,
-                eta: eta || 0,
-                health: health,
-                totalSize: totalLength || 0,
-                remaining: remaining || 0,
-                // Additional detailed stats with null protection
-                pieces: {
-                    total: piecesTotal,
-                    downloaded: piecesDownloaded
-                },
-                bandwidth: {
-                    downloadSpeedFormatted: this.formatBytes(downloadSpeed || 0) + '/s',
-                    uploadSpeedFormatted: this.formatBytes(uploadSpeed || 0) + '/s'
-                }
-            };
+        } else {
+            // Original peerflix stats code
+            // ... [your existing peerflix updateTorrentStats code] ...
+            if (!engine || !engine.swarm || !engine.torrent) {
+                console.log(`⚠️ [${streamData.id}] Engine/swarm/torrent not ready for stats update`);
+                return;
+            }
 
-            // Log significant changes (with null checks)
-            if (streamData.lastLoggedProgress === undefined || 
-                Math.abs((progress || 0) - (streamData.lastLoggedProgress || 0)) >= 5) {
-                console.log(`📊 [${streamData.id}] Progress: ${(progress || 0).toFixed(1)}%, Peers: ${peers.length} (${seeders}S/${leechers}L), Speed: ${this.formatBytes(downloadSpeed || 0)}/s, Health: ${health}`);
-                streamData.lastLoggedProgress = progress || 0;
-            }
-            
-        } catch (error) {
-            console.error(`❌ [${streamData.id}] Error updating torrent stats: ${error.message}`);
-            
-            // Set safe default stats on error
-            streamData.torrentStats = {
-                peers: 0,
-                activePeers: 0,
-                seeders: 0,
-                leechers: 0,
-                downloadSpeed: 0,
-                uploadSpeed: 0,
-                downloaded: 0,
-                uploaded: 0,
-                progress: 0,
-                ratio: 0,
-                eta: 0,
-                health: 'error',
-                totalSize: 0,
-                remaining: 0,
-                pieces: { total: 0, downloaded: 0 },
-                bandwidth: {
-                    downloadSpeedFormatted: '0 B/s',
-                    uploadSpeedFormatted: '0 B/s'
+            try {
+                const swarm = engine.swarm;
+                const torrent = engine.torrent;
+                
+                // Calculate basic stats with null checks
+                const downloaded = swarm.downloaded || 0;
+                const uploaded = swarm.uploaded || 0;
+                const totalLength = torrent.length || 0;
+                const progress = totalLength > 0 ? (downloaded / totalLength) * 100 : 0;
+                
+                // Enhanced peer statistics with null checking
+                const wires = swarm.wires || [];
+                const peers = Array.isArray(wires) ? wires : [];
+                
+                // Safely filter peers
+                let activePeers = 0;
+                let seeders = 0;
+                
+                peers.forEach(peer => {
+                    try {
+                        // Check if peer is active (not choking)
+                        if (peer && !peer.peerChoking) {
+                            activePeers++;
+                        }
+                        
+                        // Check if peer is a seeder (has all pieces)
+                        if (peer && peer.peerPieces && peer.peerPieces.buffer) {
+                            // Safer seeder detection
+                            const bufferString = peer.peerPieces.buffer.toString('hex');
+                            if (bufferString && !bufferString.includes('00')) {
+                                seeders++;
+                            }
+                        }
+                    } catch (peerError) {
+                        // Skip problematic peers
+                        console.log(`⚠️ [${streamData.id}] Skipping problematic peer: ${peerError.message}`);
+                    }
+                });
+                
+                const leechers = Math.max(0, peers.length - seeders);
+                
+                // Speed calculations with null checks
+                const downloadSpeed = (swarm.downloadSpeed && typeof swarm.downloadSpeed === 'function') 
+                    ? swarm.downloadSpeed() || 0 
+                    : 0;
+                const uploadSpeed = (swarm.uploadSpeed && typeof swarm.uploadSpeed === 'function') 
+                    ? swarm.uploadSpeed() || 0 
+                    : 0;
+                
+                // ETA calculation
+                const remaining = Math.max(0, totalLength - downloaded);
+                const eta = downloadSpeed > 0 ? remaining / downloadSpeed : 0;
+                
+                // Health calculation (based on seeders/leechers ratio and download speed)
+                let health = 'unknown';
+                if (seeders > 10) {
+                    health = 'excellent';
+                } else if (seeders > 5) {
+                    health = 'good';
+                } else if (seeders > 1) {
+                    health = 'fair';
+                } else if (seeders === 1) {
+                    health = 'poor';
+                } else {
+                    health = 'critical';
                 }
-            };
+                
+                // Update stats
+                streamData.torrentStats = {
+                    peers: peers.length || 0,
+                    activePeers: activePeers || 0,
+                    seeders: seeders || 0,
+                    leechers: leechers || 0,
+                    downloadSpeed: downloadSpeed || 0,
+                    uploadSpeed: uploadSpeed || 0,
+                    downloaded: downloaded || 0,
+                    uploaded: uploaded || 0,
+                    progress: Math.round((progress || 0) * 100) / 100,
+                    ratio: downloaded > 0 ? (uploaded / downloaded) : 0,
+                    eta: eta || 0,
+                    health: health,
+                    totalSize: totalLength || 0,
+                    remaining: remaining || 0,
+                    pieces: {
+                        total: torrent.pieces ? torrent.pieces.length : 0,
+                        downloaded: torrent.pieces ? Math.floor(downloaded / torrent.pieceLength) : 0
+                    },
+                    bandwidth: {
+                        downloadSpeedFormatted: this.formatBytes(downloadSpeed || 0) + '/s',
+                        uploadSpeedFormatted: this.formatBytes(uploadSpeed || 0) + '/s'
+                    }
+                };
+
+                // Log significant changes
+                if (streamData.lastLoggedProgress === undefined || 
+                    Math.abs(progress - streamData.lastLoggedProgress) >= 5) {
+                    console.log(`📊 [${streamData.id}] Progress: ${progress.toFixed(1)}%, Peers: ${peers.length} (${seeders}S/${leechers}L), Speed: ${this.formatBytes(downloadSpeed)}/s, Health: ${health}`);
+                    streamData.lastLoggedProgress = progress;
+                }
+            } catch (error) {
+                console.error(`❌ [${streamData.id}] Error updating torrent stats: ${error.message}`);
+                streamData.torrentStats.health = 'error';
+            }
         }
     }
 
@@ -822,9 +974,22 @@ class StreamManager {
                 clearInterval(stream.monitoringInterval);
             }
             
-            // Stop the engine
-            if (stream.engine) {
-                stream.engine.destroy();
+            // Stop the engine based on type
+            if (stream.engineType === 'webtorrent') {
+                // WebTorrent cleanup
+                if (stream.engine) {
+                    if (stream.engineInstance && stream.engineInstance !== 'pending') {
+                        // Remove the specific torrent
+                        stream.engine.remove(stream.engineInstance, {removeTorrent: true});
+                    }
+                    // Destroy the client
+                    stream.engine.destroy();
+                }
+            } else {
+                // Peerflix cleanup
+                if (stream.engine) {
+                    stream.engine.destroy();
+                }
             }
             
             // Clean up downloaded files
@@ -881,7 +1046,7 @@ app.get('/api/health', (req, res) => {
 
 // Create new stream with limits
 app.post('/api/streams', (req, res) => {
-    const { magnetLink, clientId } = req.body;
+    const { magnetLink, clientId, engine = CONFIG.DEFAULT_ENGINE } = req.body;
     
     if (!magnetLink || !clientId) {
         return res.status(400).json({
@@ -889,17 +1054,20 @@ app.post('/api/streams', (req, res) => {
         });
     }
 
+    // Validate engine type
+    const engineType = engine === 'peerflix' ? 'peerflix' : 'webtorrent';
+
     try {
-        const stream = streamManager.createStream(magnetLink, clientId);
+        const stream = streamManager.createStream(magnetLink, clientId, engineType);
         res.status(201).json({
             streamId: stream.id,
             status: stream.status,
             createdAt: stream.createdAt,
-            noTimeout: true, // Indicate no timeout
+            engineType: engineType,
+            noTimeout: true,
             limits: {
                 maxConcurrentStreams: CONFIG.MAX_CONCURRENT_STREAMS,
                 maxStreamsPerClient: CONFIG.MAX_STREAMS_PER_CLIENT
-                // REMOVED: streamTimeout (since it doesn't exist in CONFIG)
             }
         });
     } catch (error) {
@@ -1198,7 +1366,7 @@ wss.on('connection', (ws, req) => {
 // WebSocket message handlers
 function handleCreateStreamWS(data, ws, clientId) {
     try {
-        const { magnetLink } = data;
+        const { magnetLink, engine = CONFIG.DEFAULT_ENGINE } = data;
         
         if (!magnetLink) {
             ws.send(JSON.stringify({
@@ -1208,20 +1376,24 @@ function handleCreateStreamWS(data, ws, clientId) {
             return;
         }
 
-        console.log(`🚀 Creating stream via WebSocket for client ${clientId}`);
+        // Validate engine type
+        const engineType = engine === 'peerflix' ? 'peerflix' : 'webtorrent';
         
-        // Use the same logic as REST API
-        const stream = streamManager.createStream(magnetLink, clientId);
+        console.log(`🚀 Creating stream via WebSocket for client ${clientId} using ${engineType}`);
+        
+        // Use the selected engine
+        const stream = streamManager.createStream(magnetLink, clientId, engineType);
         
         // Send success response
         ws.send(JSON.stringify({
             type: 'stream_created',
             streamId: stream.id,
             status: stream.status,
+            engineType: engineType,
             timestamp: Date.now()
         }));
         
-        console.log(`✅ Stream ${stream.id} created via WebSocket`);
+        console.log(`✅ Stream ${stream.id} created via WebSocket using ${engineType}`);
         
     } catch (error) {
         console.error('WebSocket stream creation error:', error.message);
