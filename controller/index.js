@@ -9,15 +9,18 @@ import rateLimit from 'express-rate-limit';
 import { WebSocketServer } from 'ws';
 import peerflix from 'peerflix';
 import { v4 as uuidv4 } from 'uuid';
+import fs from 'fs';
 
 // --- Configuration ---
 const CONFIG = {
     PORT: process.env.PORT || 6543,
     HOST: process.env.HOST || '0.0.0.0',
-    MAX_CONCURRENT_STREAMS: process.env.MAX_STREAMS || 50,
-    CLEANUP_INTERVAL: 5 * 60 * 1000, // 5 minutes
-    STREAM_TIMEOUT: 30 * 60 * 1000,  // 30 minutes
-    TEMP_DIR: process.env.TEMP_DIR || '/tmp/torrent-streams'
+    MAX_CONCURRENT_STREAMS: parseInt(process.env.MAX_STREAMS) || 10, // Reduced from 50
+    MAX_STREAMS_PER_CLIENT: 2, // New: limit per client
+    CLEANUP_INTERVAL: 2 * 60 * 1000, // 2 minutes (more frequent)
+    STREAM_TIMEOUT: 10 * 60 * 1000,  // 10 minutes (shorter timeout)
+    TEMP_DIR: process.env.TEMP_DIR || '/tmp/torrent-streams',
+    MAX_DISK_USAGE: 5 * 1024 * 1024 * 1024, // 5GB max storage
 };
 
 // --- Setup ---
@@ -28,47 +31,108 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
+// --- Better Rate Limiting ---
+// Separate rate limits for different endpoints
+const apiLimiter = rateLimit({
+    windowMs: 1 * 60 * 1000, // 1 minute
+    max: 30, // 30 requests per minute per IP
+    message: { error: 'API rate limit exceeded. Please slow down.' },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+
+const streamCreateLimiter = rateLimit({
+    windowMs: 5 * 60 * 1000, // 5 minutes
+    max: 5, // Only 5 stream creations per 5 minutes per IP
+    message: { error: 'Stream creation limit exceeded. Please wait before creating more streams.' },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+
 // --- Security & Middleware ---
 app.use(helmet({
-    contentSecurityPolicy: false // Allow media streaming
+    contentSecurityPolicy: false
 }));
 
 app.use(cors({
-    origin: true, // Allow all origins for multi-platform support
+    origin: true,
     credentials: true
 }));
 
-// Rate limiting for API protection
-const limiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 100, // Limit each IP to 100 requests per windowMs
-    message: { error: 'Too many requests, please try again later.' }
+// Apply rate limiting
+app.use('/api/health', apiLimiter);
+app.use('/api/streams', (req, res, next) => {
+    if (req.method === 'POST') {
+        streamCreateLimiter(req, res, next);
+    } else {
+        apiLimiter(req, res, next);
+    }
 });
-app.use('/api/', limiter);
 
 app.use(express.json());
-
-// Serve static files (for web frontend)
 app.use(express.static(path.join(__dirname, 'view')));
 
-// --- Global State Management ---
+// --- Enhanced Stream Manager with Resource Management ---
 class StreamManager {
     constructor() {
         this.activeStreams = new Map();
         this.clientSessions = new Map();
+        this.diskUsage = 0;
         this.startCleanupInterval();
+        this.ensureTempDir();
+    }
+
+    ensureTempDir() {
+        if (!fs.existsSync(CONFIG.TEMP_DIR)) {
+            fs.mkdirSync(CONFIG.TEMP_DIR, { recursive: true });
+            console.log(`📁 Created temp directory: ${CONFIG.TEMP_DIR}`);
+        }
+    }
+
+    // Check if we can create a new stream
+    canCreateStream(clientId) {
+        const reasons = [];
+
+        // Check global stream limit
+        if (this.activeStreams.size >= CONFIG.MAX_CONCURRENT_STREAMS) {
+            reasons.push(`Global limit reached (${CONFIG.MAX_CONCURRENT_STREAMS} streams)`);
+        }
+
+        // Check per-client limit
+        const clientStreams = this.clientSessions.get(clientId);
+        if (clientStreams && clientStreams.size >= CONFIG.MAX_STREAMS_PER_CLIENT) {
+            reasons.push(`Client limit reached (${CONFIG.MAX_STREAMS_PER_CLIENT} streams per client)`);
+        }
+
+        // Check disk usage
+        if (this.diskUsage > CONFIG.MAX_DISK_USAGE) {
+            reasons.push(`Disk usage limit reached (${(this.diskUsage / 1024 / 1024 / 1024).toFixed(2)}GB)`);
+        }
+
+        return {
+            allowed: reasons.length === 0,
+            reasons: reasons
+        };
     }
 
     createStream(magnetLink, clientId) {
+        // Check if stream creation is allowed
+        const canCreate = this.canCreateStream(clientId);
+        if (!canCreate.allowed) {
+            throw new Error(`Cannot create stream: ${canCreate.reasons.join(', ')}`);
+        }
+
         const streamId = uuidv4();
         const timestamp = Date.now();
+        const streamPath = `${CONFIG.TEMP_DIR}/${streamId}`;
         
         console.log(`🚀 [${streamId}] Creating stream for client ${clientId}`);
+        console.log(`📊 Current stats: ${this.activeStreams.size}/${CONFIG.MAX_CONCURRENT_STREAMS} streams, ${(this.diskUsage / 1024 / 1024).toFixed(2)}MB used`);
         
         const engine = peerflix(magnetLink, {
-            connections: 10,
+            connections: 5, // Reduced for better resource management
             uploads: 0,
-            path: `${CONFIG.TEMP_DIR}/${streamId}`,
+            path: streamPath,
             quiet: false,
             tracker: true,
             dht: false,
@@ -84,7 +148,9 @@ class StreamManager {
             createdAt: timestamp,
             lastAccessed: timestamp,
             videoFile: null,
-            metadata: {}
+            metadata: {},
+            path: streamPath,
+            diskUsage: 0
         };
 
         this.activeStreams.set(streamId, streamData);
@@ -124,12 +190,17 @@ class StreamManager {
             streamData.metadata = {
                 filename: videoFile.name,
                 size: videoFile.length,
-                duration: null, // Could be extracted with ffprobe
+                duration: null,
                 bitrate: null
             };
 
             console.log(`✅ [${id}] Video ready: ${videoFile.name} (${(videoFile.length / 1024 / 1024).toFixed(2)} MB)`);
             this.notifyClients(id, 'stream_ready', streamData.metadata);
+        });
+
+        // Monitor download progress and disk usage
+        engine.on('download', () => {
+            this.updateDiskUsage(streamData);
         });
 
         engine.on('error', (err) => {
@@ -138,6 +209,26 @@ class StreamManager {
             streamData.error = err.message;
             this.notifyClients(id, 'stream_error', { error: err.message });
         });
+    }
+
+    updateDiskUsage(streamData) {
+        try {
+            if (fs.existsSync(streamData.path)) {
+                const stats = fs.statSync(streamData.path);
+                const newUsage = stats.size;
+                
+                // Update global disk usage
+                this.diskUsage = this.diskUsage - streamData.diskUsage + newUsage;
+                streamData.diskUsage = newUsage;
+                
+                // Log significant changes
+                if (newUsage > streamData.diskUsage + 10 * 1024 * 1024) { // Every 10MB
+                    console.log(`💾 [${streamData.id}] Downloaded: ${(newUsage / 1024 / 1024).toFixed(2)}MB`);
+                }
+            }
+        } catch (error) {
+            console.error(`Error checking disk usage for ${streamData.id}:`, error.message);
+        }
     }
 
     getStream(streamId) {
@@ -155,10 +246,18 @@ class StreamManager {
         console.log(`🗑️ [${streamId}] Destroying stream (${reason})`);
         
         try {
+            // Stop the engine
             stream.engine.destroy();
+            
+            // Clean up downloaded files
+            this.cleanupStreamFiles(stream);
+            
         } catch (e) {
             console.error(`Error destroying engine: ${e.message}`);
         }
+
+        // Update disk usage
+        this.diskUsage -= stream.diskUsage;
 
         // Remove from client sessions
         if (this.clientSessions.has(stream.clientId)) {
@@ -171,6 +270,17 @@ class StreamManager {
         this.activeStreams.delete(streamId);
         this.notifyClients(streamId, 'stream_destroyed', { reason });
         return true;
+    }
+
+    cleanupStreamFiles(stream) {
+        try {
+            if (fs.existsSync(stream.path)) {
+                fs.rmSync(stream.path, { recursive: true, force: true });
+                console.log(`🧹 [${stream.id}] Cleaned up files: ${stream.path}`);
+            }
+        } catch (error) {
+            console.error(`Error cleaning up files for ${stream.id}:`, error.message);
+        }
     }
 
     destroyClientStreams(clientId) {
@@ -221,14 +331,22 @@ class StreamManager {
             if (cleaned > 0) {
                 console.log(`🧹 Cleaned up ${cleaned} inactive streams`);
             }
+
+            // Log current resource usage
+            console.log(`📊 Resource usage: ${this.activeStreams.size}/${CONFIG.MAX_CONCURRENT_STREAMS} streams, ${(this.diskUsage / 1024 / 1024).toFixed(2)}MB disk`);
+            
         }, CONFIG.CLEANUP_INTERVAL);
     }
 
     getStats() {
         return {
             activeStreams: this.activeStreams.size,
+            maxStreams: CONFIG.MAX_CONCURRENT_STREAMS,
             connectedClients: this.clientSessions.size,
             totalConnections: wss.clients.size,
+            diskUsageBytes: this.diskUsage,
+            diskUsageMB: Math.round(this.diskUsage / 1024 / 1024),
+            maxDiskUsageMB: Math.round(CONFIG.MAX_DISK_USAGE / 1024 / 1024),
             uptime: process.uptime()
         };
     }
@@ -236,9 +354,9 @@ class StreamManager {
 
 const streamManager = new StreamManager();
 
-// --- REST API Routes (for all platforms) ---
+// --- REST API Routes ---
 
-// Health check
+// Health check with resource info
 app.get('/api/health', (req, res) => {
     res.json({
         status: 'healthy',
@@ -247,7 +365,7 @@ app.get('/api/health', (req, res) => {
     });
 });
 
-// Create new stream
+// Create new stream with limits
 app.post('/api/streams', (req, res) => {
     const { magnetLink, clientId } = req.body;
     
@@ -262,12 +380,18 @@ app.post('/api/streams', (req, res) => {
         res.status(201).json({
             streamId: stream.id,
             status: stream.status,
-            createdAt: stream.createdAt
+            createdAt: stream.createdAt,
+            limits: {
+                maxConcurrentStreams: CONFIG.MAX_CONCURRENT_STREAMS,
+                maxStreamsPerClient: CONFIG.MAX_STREAMS_PER_CLIENT,
+                streamTimeout: CONFIG.STREAM_TIMEOUT
+            }
         });
     } catch (error) {
-        console.error('Error creating stream:', error);
-        res.status(500).json({
-            error: 'Failed to create stream'
+        console.error('Error creating stream:', error.message);
+        res.status(429).json({ // 429 = Too Many Requests
+            error: error.message,
+            stats: streamManager.getStats()
         });
     }
 });
@@ -458,8 +582,8 @@ app.use((req, res) => {
 // --- Start Server ---
 server.listen(CONFIG.PORT, CONFIG.HOST, () => {
     console.log(`🚀 Multi-platform streaming API running at http://${CONFIG.HOST}:${CONFIG.PORT}`);
-    console.log(`📱 Ready for Web, Mobile, and TV clients`);
-    console.log(`🔧 Max concurrent streams: ${CONFIG.MAX_CONCURRENT_STREAMS}`);
+    console.log(`📊 Limits: ${CONFIG.MAX_CONCURRENT_STREAMS} concurrent streams, ${CONFIG.MAX_STREAMS_PER_CLIENT} per client`);
+    console.log(`💾 Max disk usage: ${(CONFIG.MAX_DISK_USAGE / 1024 / 1024 / 1024).toFixed(2)}GB`);
 });
 
 // Global error handlers
