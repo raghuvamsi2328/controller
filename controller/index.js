@@ -6,6 +6,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import rangeParser from 'range-parser';
 import cors from 'cors';
+import crypto from 'crypto'; // <-- ADD THIS LINE
 
 // --- Setup ---
 const __filename = fileURLToPath(import.meta.url);
@@ -16,7 +17,7 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 const client = new WebTorrent();
 
-const PORT = 3001;
+const PORT = 6543; // Changed from 3001
 
 // Use CORS to allow requests from other domains (e.g., a separate frontend)
 app.use(cors());
@@ -25,26 +26,35 @@ app.use(cors());
 app.use(express.static(path.join(__dirname, '..', 'view')));
 
 // --- State ---
-let activeTorrent = null;
+// Replace the single torrent state with a Map to hold multiple torrents.
+// The key will be a unique sessionId.
+const activeTorrents = new Map();
 const defaultMagnetLink = 'magnet:?xt=urn:btih:dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c';
 
 // --- Functions ---
-function clearPreviousStream() {
-    console.log('🗑️ Clearing previous stream...');
-    if (activeTorrent) {
-        client.remove(activeTorrent, { destroyStore: true });
-        activeTorrent = null;
-    }
-}
+// This function is no longer needed as we now support multiple streams.
+// function clearPreviousStream() { ... }
 
 function startStream(magnetLink, ws) {
-    clearPreviousStream();
-    console.log('Starting torrent for:', magnetLink);
+    // If this WebSocket connection already has a stream, destroy it before creating a new one.
+    if (ws.sessionId) {
+        const oldTorrent = activeTorrents.get(ws.sessionId);
+        if (oldTorrent) {
+            console.log(`🗑️ Clearing previous stream for session: ${ws.sessionId}`);
+            client.remove(oldTorrent, { destroyStore: true });
+            activeTorrents.delete(ws.sessionId);
+        }
+    }
 
-    activeTorrent = client.add(magnetLink, { destroyStoreOnDestroy: true });
+    const sessionId = crypto.randomUUID(); // Generate a unique ID for this stream session.
+    ws.sessionId = sessionId; // Associate the session ID with the WebSocket connection.
 
-    activeTorrent.on('ready', () => {
-        const videoFile = activeTorrent.files.find(file => 
+    console.log(`🚀 [${sessionId}] Starting torrent for:`, magnetLink);
+    const torrent = client.add(magnetLink, { destroyStoreOnDestroy: true });
+    activeTorrents.set(sessionId, torrent); // Add the new torrent to our collection.
+
+    torrent.on('ready', () => {
+        const videoFile = torrent.files.find(file => 
             file.name.endsWith('.mp4') || file.name.endsWith('.mkv')
         );
 
@@ -53,27 +63,33 @@ function startStream(magnetLink, ws) {
             return;
         }
         
-        console.log(`✅ File ready: ${videoFile.name}`);
+        console.log(`✅ [${sessionId}] File ready: ${videoFile.name}`);
+        // The URL now includes the unique sessionId.
         ws.send(JSON.stringify({
             type: 'streamReady',
-            url: `/stream?filename=${encodeURIComponent(videoFile.name)}`
+            url: `/stream/${sessionId}?filename=${encodeURIComponent(videoFile.name)}`
         }));
     });
 
-    activeTorrent.on('error', (err) => {
-        console.error('❌ Torrent error:', err.message);
+    torrent.on('error', (err) => {
+        console.error(`❌ [${sessionId}] Torrent error:`, err.message);
         ws.send(JSON.stringify({ type: 'error', message: 'Invalid magnet link or torrent error.' }));
+        activeTorrents.delete(sessionId); // Clean up on error.
     });
 }
 
 // --- HTTP Streaming Endpoint ---
-app.get('/stream', (req, res) => {
-    if (!activeTorrent || !activeTorrent.ready) {
-        return res.status(404).send('No active stream. Please select a torrent first.');
+// The route now includes the sessionId parameter.
+app.get('/stream/:sessionId', (req, res) => {
+    const { sessionId } = req.params;
+    const torrent = activeTorrents.get(sessionId); // Look up the specific torrent for this session.
+
+    if (!torrent || !torrent.ready) {
+        return res.status(404).send('Stream not found or not ready. Please select a torrent first.');
     }
 
     const { filename } = req.query;
-    const file = activeTorrent.files.find(f => f.name === filename);
+    const file = torrent.files.find(f => f.name === filename);
 
     if (!file) {
         return res.status(404).send('File not found in torrent.');
@@ -155,7 +171,18 @@ wss.on('connection', ws => {
         }
     });
 
-    ws.on('close', () => console.log('Client disconnected.'));
+    // When a client disconnects, clean up their associated torrent.
+    ws.on('close', () => {
+        console.log('Client disconnected.');
+        if (ws.sessionId) {
+            const torrent = activeTorrents.get(ws.sessionId);
+            if (torrent) {
+                console.log(`🧹 Cleaning up torrent for session: ${ws.sessionId}`);
+                client.remove(torrent, { destroyStore: true });
+                activeTorrents.delete(ws.sessionId);
+            }
+        }
+    });
 });
 
 // --- Start Server ---

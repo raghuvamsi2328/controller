@@ -59,14 +59,14 @@
         }
 
         function initializePlayer(streamUrl) {
-            const fullUrl = `http://${window.location.hostname}:3001${streamUrl}`;
+            const fullUrl = `http://${window.location.hostname}:6543${streamUrl}`; // Changed from 3001
             log(`Setting player source to: ${fullUrl}`);
             videoPlayer.src = fullUrl;
             videoPlayer.play().catch(e => log(`Playback was prevented: ${e.message}`));
         }
 
         // --- WebSocket Connection ---
-        const ws = new WebSocket(`ws://${window.location.hostname}:3001`);
+        const ws = new WebSocket(`ws://${window.location.hostname}:6543`); // Changed from 3001
 
         ws.onopen = () => log('WebSocket connection established.');
         ws.onclose = () => log('WebSocket connection closed.');
