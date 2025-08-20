@@ -126,17 +126,40 @@ class StreamManager {
         const timestamp = Date.now();
         const streamPath = `${CONFIG.TEMP_DIR}/${streamId}`;
         
+        // Calculate dynamic connection limit based on current load
+        const currentLoad = this.activeStreams.size;
+        const maxLoad = CONFIG.MAX_CONCURRENT_STREAMS;
+        const loadPercentage = currentLoad / maxLoad;
+        
+        // Dynamic connection scaling:
+        // - Low load (0-30%): 50 connections (fast)
+        // - Medium load (30-70%): 25 connections (balanced)
+        // - High load (70-100%): 10 connections (conservative)
+        let connectionLimit;
+        if (loadPercentage <= 0.3) {
+            connectionLimit = 50; // Fast streaming when server has capacity
+        } else if (loadPercentage <= 0.7) {
+            connectionLimit = 25; // Balanced performance
+        } else {
+            connectionLimit = 10; // Conservative when under heavy load
+        }
+        
         console.log(`🚀 [${streamId}] Creating stream for client ${clientId}`);
-        console.log(`📊 Current stats: ${this.activeStreams.size}/${CONFIG.MAX_CONCURRENT_STREAMS} streams, ${(this.diskUsage / 1024 / 1024).toFixed(2)}MB used`);
+        console.log(`📊 Current load: ${currentLoad}/${maxLoad} (${(loadPercentage * 100).toFixed(1)}%) - Using ${connectionLimit} connections`);
         
         const engine = peerflix(magnetLink, {
-            connections: 5, // Reduced for better resource management
-            uploads: 0,
+            connections: connectionLimit, // Dynamic based on server load
+            uploads: 0, // Still disable uploads to save bandwidth
             path: streamPath,
             quiet: false,
             tracker: true,
             dht: false,
-            webSeeds: true
+            webSeeds: true,
+            // Additional performance options
+            blocklist: false, // Disable IP blocklist for more peers
+            verify: false,    // Skip hash verification for faster startup
+            // Download strategy for streaming
+            strategy: 'rarest' // or 'sequential' for streaming
         });
 
         const streamData = {
