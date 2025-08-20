@@ -310,8 +310,9 @@ wss.on('connection', ws => {
 });
 
 // --- Start Server ---
-server.listen(PORT, () => {
-    console.log(`🚀 Server running at http://localhost:${PORT}`);
+server.listen(PORT, '0.0.0.0', () => {
+    console.log(`🚀 Server running at http://0.0.0.0:${PORT}`);
+    console.log(`🌐 Network access: http://192.168.1.19:${PORT}`);
 });
 
 // Add global error handlers to prevent crashes
