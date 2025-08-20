@@ -23,7 +23,8 @@ const PORT = 6543; // Changed from 3001
 app.use(cors());
 
 // Serve the HTML file from the 'view' folder
-app.use(express.static(path.join(__dirname, '..', 'view')));
+// THE FIX: Remove the '..' to point to the correct directory inside the container.
+app.use(express.static(path.join(__dirname, 'view')));
 
 // --- State ---
 // Replace the single torrent state with a Map to hold multiple torrents.
