@@ -217,7 +217,7 @@ class StreamManager {
             blocklist: false, // Disable IP blocklist for more peers
             verify: false,    // Skip hash verification for faster startup
             // Download strategy for streaming
-            strategy: 'rarest' // or 'sequential' for streaming
+            strategy: 'sequential' // or 'sequential' for streaming
         });
 
         const streamData = {
@@ -1069,6 +1069,8 @@ app.get('/stream/:streamId', (req, res) => {
         if (extension === '.mkv') {
             res.setHeader('X-Content-Type-Options', 'nosniff');
             res.setHeader('Accept-Encoding', 'identity'); // Disable compression for MKV
+            res.setHeader('Content-Disposition', 'inline');  // Add this
+            // Consider additional headers if needed
         }
         
         // Large file optimizations
@@ -1079,7 +1081,7 @@ app.get('/stream/:streamId', (req, res) => {
         const streamInstance = videoFile.createReadStream({ 
             start, 
             end,
-            highWaterMark: 64 * 1024 // 64KB buffer for smoother streaming
+            highWaterMark: isLargeFile ? 256 * 1024 : 128 * 1024 // Increased buffers
         });
         
         streamInstance.on('error', (err) => {
@@ -1110,6 +1112,8 @@ app.get('/stream/:streamId', (req, res) => {
         if (extension === '.mkv') {
             res.setHeader('X-Content-Type-Options', 'nosniff');
             res.setHeader('Accept-Encoding', 'identity');
+            res.setHeader('Content-Disposition', 'inline');  // Add this
+            // Consider additional headers if needed
         }
 
         const streamInstance = videoFile.createReadStream({
