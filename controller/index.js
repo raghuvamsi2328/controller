@@ -249,7 +249,7 @@ class StreamManager {
     setupEngineEvents(streamData) {
         const { id, engine } = streamData;
 
-        // Initialize torrent stats
+        // Initialize torrent stats with safe defaults
         streamData.torrentStats = {
             peers: 0,
             seeders: 0,
@@ -261,73 +261,105 @@ class StreamManager {
             progress: 0,
             ratio: 0,
             eta: 0,
-            health: 'unknown'
+            health: 'initializing'
         };
 
         engine.on('ready', () => {
-            console.log(`✅ [${id}] Engine ready`);
-            console.log(`📁 [${id}] Total files in torrent: ${engine.files.length}`);
-            console.log(`🌐 [${id}] Torrent info hash: ${engine.torrent.infoHash}`);
-            console.log(`📦 [${id}] Total size: ${(engine.torrent.length / 1024 / 1024).toFixed(2)}MB`);
-            
-            // Log all files for debugging
-            engine.files.forEach((file, index) => {
-                console.log(`📄 [${id}] File ${index}: ${file.name} (${(file.length / 1024 / 1024).toFixed(2)}MB)`);
-            });
-            
-            // Start torrent monitoring
-            this.startTorrentMonitoring(streamData);
-            
-            const videoFile = this.findBestVideoFile(engine.files, id);
+            try {
+                console.log(`✅ [${id}] Engine ready`);
+                
+                // Safe access to engine properties
+                const filesCount = engine.files ? engine.files.length : 0;
+                const infoHash = engine.torrent ? engine.torrent.infoHash : 'unknown';
+                const totalSize = engine.torrent ? engine.torrent.length : 0;
+                
+                console.log(`📁 [${id}] Total files in torrent: ${filesCount}`);
+                console.log(`🌐 [${id}] Torrent info hash: ${infoHash}`);
+                console.log(`📦 [${id}] Total size: ${(totalSize / 1024 / 1024).toFixed(2)}MB`);
+                
+                // Safely log all files
+                if (engine.files && Array.isArray(engine.files)) {
+                    engine.files.forEach((file, index) => {
+                        const fileName = file && file.name ? file.name : `File ${index}`;
+                        const fileSize = file && file.length ? file.length : 0;
+                        console.log(`📄 [${id}] File ${index}: ${fileName} (${(fileSize / 1024 / 1024).toFixed(2)}MB)`);
+                    });
+                }
+                
+                // Start torrent monitoring
+                this.startTorrentMonitoring(streamData);
+                
+                const videoFile = this.findBestVideoFile(engine.files || [], id);
 
-            if (!videoFile) {
+                if (!videoFile) {
+                    streamData.status = 'error';
+                    streamData.error = 'No suitable video file found';
+                    console.log(`❌ [${id}] No video file found`);
+                    this.notifyClients(id, 'stream_error', { error: 'No suitable video file found' });
+                    return;
+                }
+
+                streamData.status = 'ready';
+                streamData.videoFile = videoFile;
+                streamData.metadata = {
+                    filename: videoFile.name || 'unknown',
+                    size: videoFile.length || 0,
+                    duration: null,
+                    bitrate: null,
+                    container: path.extname(videoFile.name || '').toLowerCase(),
+                    isInFolder: (videoFile.name || '').includes('/') || (videoFile.name || '').includes('\\'),
+                    torrentHash: infoHash,
+                    totalTorrentSize: totalSize
+                };
+
+                console.log(`✅ [${id}] Video ready: ${videoFile.name} (${(videoFile.length / 1024 / 1024).toFixed(2)} MB)`);
+                console.log(`📦 [${id}] Container: ${streamData.metadata.container}, In folder: ${streamData.metadata.isInFolder}`);
+                
+                this.notifyClients(id, 'stream_ready', streamData.metadata);
+                
+            } catch (readyError) {
+                console.error(`❌ [${id}] Error in ready handler: ${readyError.message}`);
                 streamData.status = 'error';
-                streamData.error = 'No suitable video file found';
-                console.log(`❌ [${id}] No video file found`);
-                this.notifyClients(id, 'stream_error', { error: 'No suitable video file found' });
-                return;
+                streamData.error = `Ready handler error: ${readyError.message}`;
+                this.notifyClients(id, 'stream_error', { error: streamData.error });
             }
-
-            streamData.status = 'ready';
-            streamData.videoFile = videoFile;
-            streamData.metadata = {
-                filename: videoFile.name,
-                size: videoFile.length,
-                duration: null,
-                bitrate: null,
-                container: path.extname(videoFile.name).toLowerCase(),
-                isInFolder: videoFile.name.includes('/') || videoFile.name.includes('\\'),
-                torrentHash: engine.torrent.infoHash,
-                totalTorrentSize: engine.torrent.length
-            };
-
-            console.log(`✅ [${id}] Video ready: ${videoFile.name} (${(videoFile.length / 1024 / 1024).toFixed(2)} MB)`);
-            console.log(`📦 [${id}] Container: ${streamData.metadata.container}, In folder: ${streamData.metadata.isInFolder}`);
-            
-            this.notifyClients(id, 'stream_ready', streamData.metadata);
         });
 
-        // Enhanced download monitoring
+        // Enhanced download monitoring with error handling
         engine.on('download', (pieceIndex) => {
-            this.updateDiskUsage(streamData);
-            this.updateTorrentStats(streamData);
+            try {
+                this.updateDiskUsage(streamData);
+                this.updateTorrentStats(streamData);
+            } catch (downloadError) {
+                console.error(`❌ [${id}] Error in download handler: ${downloadError.message}`);
+            }
         });
 
-        // Peer connection events
+        // Enhanced peer connection events with error handling
         engine.on('peer', (peer) => {
-            console.log(`👥 [${id}] New peer connected: ${peer.remoteAddress}`);
-            this.updateTorrentStats(streamData);
+            try {
+                const peerAddress = peer && peer.remoteAddress ? peer.remoteAddress : 'unknown';
+                console.log(`👥 [${id}] New peer connected: ${peerAddress}`);
+                this.updateTorrentStats(streamData);
+            } catch (peerError) {
+                console.error(`❌ [${id}] Error in peer handler: ${peerError.message}`);
+            }
         });
 
-        // Upload events
+        // Enhanced upload events with error handling
         engine.on('upload', (pieceIndex, offset, length) => {
-            this.updateTorrentStats(streamData);
+            try {
+                this.updateTorrentStats(streamData);
+            } catch (uploadError) {
+                console.error(`❌ [${id}] Error in upload handler: ${uploadError.message}`);
+            }
         });
 
         engine.on('error', (err) => {
             console.error(`❌ [${id}] Engine error:`, err.message);
             streamData.status = 'error';
             streamData.error = err.message;
+            streamData.torrentStats.health = 'error';
             this.notifyClients(id, 'stream_error', { error: err.message });
         });
     }
@@ -347,77 +379,154 @@ class StreamManager {
     updateTorrentStats(streamData) {
         const { engine } = streamData;
         
-        if (!engine || !engine.swarm) return;
-
-        const swarm = engine.swarm;
-        const torrent = engine.torrent;
-        
-        // Calculate basic stats
-        const downloaded = swarm.downloaded;
-        const uploaded = swarm.uploaded;
-        const totalLength = torrent.length;
-        const progress = totalLength > 0 ? (downloaded / totalLength) * 100 : 0;
-        
-        // Peer statistics
-        const peers = swarm.wires || [];
-        const activePeers = peers.filter(peer => !peer.peerChoking).length;
-        const seeders = peers.filter(peer => peer.peerPieces && peer.peerPieces.buffer.toString('hex').indexOf('00') === -1).length;
-        const leechers = peers.length - seeders;
-        
-        // Speed calculations (bytes per second)
-        const downloadSpeed = swarm.downloadSpeed() || 0;
-        const uploadSpeed = swarm.uploadSpeed() || 0;
-        
-        // ETA calculation
-        const remaining = totalLength - downloaded;
-        const eta = downloadSpeed > 0 ? remaining / downloadSpeed : 0;
-        
-        // Health calculation (based on seeders/leechers ratio and download speed)
-        let health = 'unknown';
-        if (seeders > 10) {
-            health = 'excellent';
-        } else if (seeders > 5) {
-            health = 'good';
-        } else if (seeders > 1) {
-            health = 'fair';
-        } else if (seeders === 1) {
-            health = 'poor';
-        } else {
-            health = 'critical';
+        // Enhanced null checking
+        if (!engine || !engine.swarm || !engine.torrent) {
+            console.log(`⚠️ [${streamData.id}] Engine/swarm/torrent not ready for stats update`);
+            return;
         }
-        
-        // Update stats
-        streamData.torrentStats = {
-            peers: peers.length,
-            activePeers: activePeers,
-            seeders: seeders,
-            leechers: leechers,
-            downloadSpeed: downloadSpeed,
-            uploadSpeed: uploadSpeed,
-            downloaded: downloaded,
-            uploaded: uploaded,
-            progress: Math.round(progress * 100) / 100,
-            ratio: downloaded > 0 ? uploaded / downloaded : 0,
-            eta: eta,
-            health: health,
-            totalSize: totalLength,
-            remaining: remaining,
-            // Additional detailed stats
-            pieces: {
-                total: torrent.pieces ? torrent.pieces.length : 0,
-                downloaded: swarm.downloaded ? Math.floor(downloaded / torrent.pieceLength) : 0
-            },
-            bandwidth: {
-                downloadSpeedFormatted: this.formatBytes(downloadSpeed) + '/s',
-                uploadSpeedFormatted: this.formatBytes(uploadSpeed) + '/s'
-            }
-        };
 
-        // Log significant changes
-        if (streamData.lastLoggedProgress === undefined || 
-            Math.abs(progress - streamData.lastLoggedProgress) >= 5) {
-            console.log(`📊 [${streamData.id}] Progress: ${progress.toFixed(1)}%, Peers: ${peers.length} (${seeders}S/${leechers}L), Speed: ${this.formatBytes(downloadSpeed)}/s, Health: ${health}`);
-            streamData.lastLoggedProgress = progress;
+        try {
+            const swarm = engine.swarm;
+            const torrent = engine.torrent;
+            
+            // Calculate basic stats with null checks
+            const downloaded = swarm.downloaded || 0;
+            const uploaded = swarm.uploaded || 0;
+            const totalLength = torrent.length || 0;
+            const progress = totalLength > 0 ? (downloaded / totalLength) * 100 : 0;
+            
+            // Enhanced peer statistics with null checking
+            const wires = swarm.wires || [];
+            const peers = Array.isArray(wires) ? wires : [];
+            
+            // Safely filter peers
+            let activePeers = 0;
+            let seeders = 0;
+            
+            peers.forEach(peer => {
+                try {
+                    // Check if peer is active (not choking)
+                    if (peer && !peer.peerChoking) {
+                        activePeers++;
+                    }
+                    
+                    // Check if peer is a seeder (has all pieces)
+                    if (peer && peer.peerPieces && peer.peerPieces.buffer) {
+                        // Safer seeder detection
+                        const bufferString = peer.peerPieces.buffer.toString('hex');
+                        if (bufferString && !bufferString.includes('00')) {
+                            seeders++;
+                        }
+                    }
+                } catch (peerError) {
+                    // Skip problematic peers
+                    console.log(`⚠️ [${streamData.id}] Skipping problematic peer: ${peerError.message}`);
+                }
+            });
+            
+            const leechers = Math.max(0, peers.length - seeders);
+            
+            // Speed calculations with null checks
+            const downloadSpeed = (swarm.downloadSpeed && typeof swarm.downloadSpeed === 'function') 
+                ? swarm.downloadSpeed() || 0 
+                : 0;
+            const uploadSpeed = (swarm.uploadSpeed && typeof swarm.uploadSpeed === 'function') 
+                ? swarm.uploadSpeed() || 0 
+                : 0;
+            
+            // ETA calculation
+            const remaining = Math.max(0, totalLength - downloaded);
+            const eta = downloadSpeed > 0 ? remaining / downloadSpeed : 0;
+            
+            // Health calculation (based on seeders/leechers ratio and download speed)
+            let health = 'unknown';
+            if (seeders > 10) {
+                health = 'excellent';
+            } else if (seeders > 5) {
+                health = 'good';
+            } else if (seeders > 1) {
+                health = 'fair';
+            } else if (seeders === 1) {
+                health = 'poor';
+            } else {
+                health = 'critical';
+            }
+            
+            // Enhanced pieces calculation with null checks
+            let piecesTotal = 0;
+            let piecesDownloaded = 0;
+            
+            try {
+                if (torrent.pieces && torrent.pieces.length) {
+                    piecesTotal = torrent.pieces.length;
+                }
+                
+                if (torrent.pieceLength && downloaded > 0) {
+                    piecesDownloaded = Math.floor(downloaded / torrent.pieceLength);
+                }
+            } catch (piecesError) {
+                console.log(`⚠️ [${streamData.id}] Error calculating pieces: ${piecesError.message}`);
+            }
+            
+            // Update stats safely
+            streamData.torrentStats = {
+                peers: peers.length || 0,
+                activePeers: activePeers || 0,
+                seeders: seeders || 0,
+                leechers: leechers || 0,
+                downloadSpeed: downloadSpeed || 0,
+                uploadSpeed: uploadSpeed || 0,
+                downloaded: downloaded || 0,
+                uploaded: uploaded || 0,
+                progress: Math.round((progress || 0) * 100) / 100,
+                ratio: downloaded > 0 ? (uploaded / downloaded) : 0,
+                eta: eta || 0,
+                health: health,
+                totalSize: totalLength || 0,
+                remaining: remaining || 0,
+                // Additional detailed stats with null protection
+                pieces: {
+                    total: piecesTotal,
+                    downloaded: piecesDownloaded
+                },
+                bandwidth: {
+                    downloadSpeedFormatted: this.formatBytes(downloadSpeed || 0) + '/s',
+                    uploadSpeedFormatted: this.formatBytes(uploadSpeed || 0) + '/s'
+                }
+            };
+
+            // Log significant changes (with null checks)
+            if (streamData.lastLoggedProgress === undefined || 
+                Math.abs((progress || 0) - (streamData.lastLoggedProgress || 0)) >= 5) {
+                console.log(`📊 [${streamData.id}] Progress: ${(progress || 0).toFixed(1)}%, Peers: ${peers.length} (${seeders}S/${leechers}L), Speed: ${this.formatBytes(downloadSpeed || 0)}/s, Health: ${health}`);
+                streamData.lastLoggedProgress = progress || 0;
+            }
+            
+        } catch (error) {
+            console.error(`❌ [${streamData.id}] Error updating torrent stats: ${error.message}`);
+            
+            // Set safe default stats on error
+            streamData.torrentStats = {
+                peers: 0,
+                activePeers: 0,
+                seeders: 0,
+                leechers: 0,
+                downloadSpeed: 0,
+                uploadSpeed: 0,
+                downloaded: 0,
+                uploaded: 0,
+                progress: 0,
+                ratio: 0,
+                eta: 0,
+                health: 'error',
+                totalSize: 0,
+                remaining: 0,
+                pieces: { total: 0, downloaded: 0 },
+                bandwidth: {
+                    downloadSpeedFormatted: '0 B/s',
+                    uploadSpeedFormatted: '0 B/s'
+                }
+            };
         }
     }
 
@@ -754,7 +863,7 @@ class StreamManager {
         }
     }
 
-    // ... rest of your existing methods stay the same ...
+    // --- rest of your existing methods stay the same ...
 }
 
 const streamManager = new StreamManager();
