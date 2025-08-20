@@ -20,32 +20,45 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
-const client = new WebTorrent();
 
-const PORT = 6543; // Changed from 3001
+// Configure WebTorrent client for Docker environment
+const client = new WebTorrent({
+    // Disable DHT and PEX to make it more stable in containers
+    dht: false,
+    webSeeds: true,
+    // Use only HTTP trackers, avoid UDP in Docker
+    tracker: {
+        announce: [],
+        getAnnounceOpts: () => ({
+            numwant: 50,
+            uploaded: 0,
+            downloaded: 0
+        })
+    }
+});
 
-// Use CORS to allow requests from other domains (e.g., a separate frontend)
+const PORT = 6543;
+
+// Add error handler for WebTorrent client
+client.on('error', (err) => {
+    console.error('🔥 WebTorrent client error:', err.message);
+});
+
+// Use CORS to allow requests from other domains
 app.use(cors());
 
 // Serve the HTML file from the 'view' folder
-// THE FIX: Remove the '..' to point to the correct directory inside the container.
 app.use(express.static(path.join(__dirname, 'view')));
 
 // --- State ---
-// Replace the single torrent state with a Map to hold multiple torrents.
-// The key will be a unique sessionId.
 const activeTorrents = new Map();
 const defaultMagnetLink = 'magnet:?xt=urn:btih:dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c';
 
 // --- Functions ---
-// This function is no longer needed as we now support multiple streams.
-// function clearPreviousStream() { ... }
-
 function startStream(magnetLink, ws) {
     try {
         console.log(`🔍 [DEBUG] startStream called with magnet: ${magnetLink.substring(0, 80)}...`);
         
-        // If this WebSocket connection already has a stream, destroy it before creating a new one.
         if (ws.sessionId) {
             const oldTorrent = activeTorrents.get(ws.sessionId);
             if (oldTorrent) {
@@ -61,18 +74,19 @@ function startStream(magnetLink, ws) {
 
         console.log(`🚀 [${sessionId}] Starting torrent for:`, magnetLink);
         
-        // Add error handling for the torrent creation itself
         let torrent;
         try {
             console.log(`🔍 [DEBUG] About to call client.add...`);
+            
+            // Add torrent with more conservative options for Docker
             torrent = client.add(magnetLink, { 
                 destroyStoreOnDestroy: true,
-                // Add these options to make it more robust in Docker
-                downloadLimit: -1,
-                uploadLimit: -1,
-                maxConns: 55,
-                tracker: { announce: [] }
+                maxConns: 10,  // Reduced from 55
+                downloadLimit: 1024 * 1024 * 5,  // 5 MB/s limit
+                uploadLimit: 0,  // Disable uploading to save resources
+                strategy: 'sequential'  // Download sequentially for streaming
             });
+            
             console.log(`🔍 [DEBUG] client.add completed successfully`);
         } catch (addError) {
             console.error(`❌ [${sessionId}] Failed to add torrent:`, addError.message);
@@ -83,13 +97,16 @@ function startStream(magnetLink, ws) {
         activeTorrents.set(sessionId, torrent);
         console.log(`🔍 [DEBUG] Torrent added to activeTorrents map`);
 
-        // Set a timeout to detect if the torrent never becomes ready
+        // Shorter timeout and more frequent status updates
         const readyTimeout = setTimeout(() => {
-            console.error(`❌ [${sessionId}] Torrent ready timeout after 30 seconds`);
-            ws.send(JSON.stringify({ type: 'error', message: 'Torrent took too long to become ready. Try a different magnet link.' }));
+            console.error(`❌ [${sessionId}] Torrent ready timeout after 20 seconds`);
+            ws.send(JSON.stringify({ type: 'error', message: 'Torrent took too long to become ready. The torrent may have no available peers.' }));
             client.remove(torrent, { destroyStore: true });
             activeTorrents.delete(sessionId);
-        }, 30000);
+        }, 20000); // Reduced from 30 seconds
+
+        // Add immediate status logging
+        console.log(`🔍 [DEBUG] Setting up torrent event listeners...`);
 
         torrent.on('ready', () => {
             try {
@@ -123,23 +140,32 @@ function startStream(magnetLink, ws) {
         torrent.on('error', (err) => {
             clearTimeout(readyTimeout);
             console.error(`❌ [${sessionId}] Torrent error:`, err.message);
-            ws.send(JSON.stringify({ type: 'error', message: 'Invalid magnet link or torrent error.' }));
+            ws.send(JSON.stringify({ type: 'error', message: `Torrent error: ${err.message}` }));
             activeTorrents.delete(sessionId);
         });
 
-        // Add more event listeners for debugging
+        // More conservative event logging to avoid spam
+        let lastLogTime = 0;
         torrent.on('download', () => {
-            console.log(`🔍 [${sessionId}] Download progress: ${(torrent.progress * 100).toFixed(1)}%`);
+            const now = Date.now();
+            if (now - lastLogTime > 5000) { // Log every 5 seconds max
+                console.log(`🔍 [${sessionId}] Download progress: ${(torrent.progress * 100).toFixed(1)}%, peers: ${torrent.numPeers}`);
+                lastLogTime = now;
+            }
         });
 
-        torrent.on('wire', (wire) => {
-            console.log(`🔍 [${sessionId}] Connected to peer`);
+        torrent.on('wire', () => {
+            console.log(`🔍 [${sessionId}] Connected to a peer. Total peers: ${torrent.numPeers}`);
         });
+
+        console.log(`🔍 [DEBUG] Event listeners set up successfully`);
 
     } catch (error) {
         console.error('❌ Critical error in startStream:', error.message);
         console.error('Stack trace:', error.stack);
-        ws.send(JSON.stringify({ type: 'error', message: 'Server error occurred.' }));
+        if (ws.readyState === ws.OPEN) {
+            ws.send(JSON.stringify({ type: 'error', message: 'Server error occurred.' }));
+        }
     }
 }
 
@@ -254,3 +280,17 @@ wss.on('connection', ws => {
 server.listen(PORT, () => {
     console.log(`🚀 Server running at http://localhost:${PORT}`);
 });
+
+// Add global error handlers to prevent crashes
+process.on('uncaughtException', (error) => {
+    console.error('🔥 Uncaught Exception:', error.message);
+    console.error('Stack:', error.stack);
+    // Don't exit, just log the error
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('🔥 Unhandled Rejection at:', promise, 'reason:', reason);
+    // Don't exit, just log the error
+});
+
+console.log('🛡️ Global error handlers installed');
