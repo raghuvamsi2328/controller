@@ -2,22 +2,14 @@ version: '3.8'
 
 services:
   streamer:
-    image: node:18-alpine
     container_name: torrent-streamer
     restart: unless-stopped
     
-    # Set the working directory inside the container
-    working_dir: /usr/src/app
-    
+    # Build the Docker image from the Dockerfile in the 'controller' directory
+    build:
+      context: ./controller
+      dockerfile: Dockerfile
+      
     # Map the host port to the container port
     ports:
       - "6543:6543"
-      
-    # Map your local code directory into the container
-    # This allows you to change code without rebuilding the image
-    volumes:
-      - ./controller:/usr/src/app
-      
-    # The command to run when the container starts
-    # It first installs dependencies, then starts the server
-    command: sh -c "npm install && node index.js"
