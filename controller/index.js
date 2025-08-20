@@ -98,21 +98,20 @@ function startStream(magnetLink, ws) {
         try {
             console.log(`🔍 [DEBUG] About to call client.add...`);
             
-            // Add torrent with more conservative options for Docker
+            // Add torrent with VERY conservative options to prevent crashes
             torrent = client.add(magnetLink, { 
                 destroyStoreOnDestroy: true,
-                maxConns: 5,  // Very conservative connection limit
-                downloadLimit: 1024 * 1024 * 2,  // 2 MB/s limit
-                uploadLimit: 0,  // Completely disable uploading
+                maxConns: 2,  // Even more conservative
+                downloadLimit: 1024 * 1024,  // 1 MB/s limit
+                uploadLimit: 0,
                 strategy: 'sequential',
-                announce: [
-                    // Add reliable WebSocket trackers
-                    'wss://tracker.openwebtorrent.com',
-                    'wss://tracker.btorrent.xyz'
-                ]
+                // Try to force only WebSocket trackers
+                tracker: false,  // Disable automatic tracker discovery
+                announce: []     // Don't use any additional trackers
             });
             
             console.log(`🔍 [DEBUG] client.add completed successfully`);
+            console.log(`🔍 [DEBUG] Torrent infoHash: ${torrent.infoHash}`);
         } catch (addError) {
             console.error(`❌ [${sessionId}] Failed to add torrent:`, addError.message);
             ws.send(JSON.stringify({ type: 'error', message: 'Failed to add torrent. Invalid magnet link.' }));
@@ -122,20 +121,17 @@ function startStream(magnetLink, ws) {
         activeTorrents.set(sessionId, torrent);
         console.log(`🔍 [DEBUG] Torrent added to activeTorrents map`);
 
-        // Shorter timeout and more frequent status updates
-        const readyTimeout = setTimeout(() => {
-            console.error(`❌ [${sessionId}] Torrent ready timeout after 20 seconds`);
-            ws.send(JSON.stringify({ type: 'error', message: 'Torrent took too long to become ready. The torrent may have no available peers.' }));
-            client.remove(torrent, { destroyStore: true });
-            activeTorrents.delete(sessionId);
-        }, 20000); // Reduced from 30 seconds
+        // Add more specific event handlers to catch what's causing the crash
+        torrent.on('infoHash', () => {
+            console.log(`🔍 [${sessionId}] Torrent infoHash obtained`);
+        });
 
-        // Add immediate status logging
-        console.log(`🔍 [DEBUG] Setting up torrent event listeners...`);
+        torrent.on('metadata', () => {
+            console.log(`🔍 [${sessionId}] Torrent metadata received`);
+        });
 
         torrent.on('ready', () => {
             try {
-                clearTimeout(readyTimeout);
                 console.log(`✅ [${sessionId}] Torrent ready: ${torrent.name}`);
                 console.log(`🔍 [DEBUG] Torrent has ${torrent.files.length} files`);
                 
@@ -163,27 +159,35 @@ function startStream(magnetLink, ws) {
         });
 
         torrent.on('error', (err) => {
-            clearTimeout(readyTimeout);
             console.error(`❌ [${sessionId}] Torrent error:`, err.message);
+            console.error(`❌ [${sessionId}] Error stack:`, err.stack);
             ws.send(JSON.stringify({ type: 'error', message: `Torrent error: ${err.message}` }));
             activeTorrents.delete(sessionId);
         });
 
-        // More conservative event logging to avoid spam
-        let lastLogTime = 0;
-        torrent.on('download', () => {
-            const now = Date.now();
-            if (now - lastLogTime > 5000) { // Log every 5 seconds max
-                console.log(`🔍 [${sessionId}] Download progress: ${(torrent.progress * 100).toFixed(1)}%, peers: ${torrent.numPeers}`);
-                lastLogTime = now;
-            }
+        // Log when peers connect (this might be where it crashes)
+        torrent.on('wire', (wire) => {
+            console.log(`🔍 [${sessionId}] New peer connection. Total peers: ${torrent.numPeers}`);
+            
+            // Add error handler for individual wire connections
+            wire.on('error', (wireError) => {
+                console.error(`❌ [${sessionId}] Wire error:`, wireError.message);
+            });
         });
 
-        torrent.on('wire', () => {
-            console.log(`🔍 [${sessionId}] Connected to a peer. Total peers: ${torrent.numPeers}`);
+        // Log download events (another potential crash point)
+        torrent.on('download', (bytes) => {
+            console.log(`🔍 [${sessionId}] Downloaded ${bytes} bytes. Progress: ${(torrent.progress * 100).toFixed(1)}%`);
         });
 
         console.log(`🔍 [DEBUG] Event listeners set up successfully`);
+
+        // Add a timeout to see if the torrent stalls
+        setTimeout(() => {
+            if (!torrent.ready) {
+                console.log(`⏰ [${sessionId}] Status check: ready=${torrent.ready}, numPeers=${torrent.numPeers}, downloaded=${torrent.downloaded}`);
+            }
+        }, 10000);
 
     } catch (error) {
         console.error('❌ Critical error in startStream:', error.message);
