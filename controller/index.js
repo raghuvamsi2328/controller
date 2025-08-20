@@ -110,7 +110,7 @@ class StreamManager {
         this.clientConnections = new Map();
         this.diskUsage = 0;
         this.startupTime = Date.now();
-        this.startMonitoringInterval(); // Renamed - only for status logging
+        this.startMonitoringInterval();
         this.ensureTempDir();
     }
 
@@ -538,6 +538,222 @@ class StreamManager {
         return destroyed;
     }
 
+    // Add missing getStats method
+    getStats() {
+        const now = Date.now();
+        const uptime = now - this.startupTime;
+        
+        return {
+            activeStreams: this.activeStreams.size,
+            connectedClients: this.clientConnections.size,
+            uptime: uptime, // milliseconds
+            diskUsage: this.diskUsage,
+            maxStreams: CONFIG.MAX_CONCURRENT_STREAMS,
+            timestamp: now
+        };
+    }
+
+    // Add missing findBestVideoFile method
+    findBestVideoFile(files, streamId) {
+        console.log(`🔍 [${streamId}] Searching for best video file among ${files.length} files`);
+        
+        // Define video extensions with priority (higher score = better)
+        const videoExtensions = {
+            '.mp4': 10,   // Best compatibility
+            '.mkv': 9,    // High quality, good support
+            '.avi': 7,    // Good compatibility
+            '.mov': 6,    // Apple format
+            '.wmv': 5,    // Windows format
+            '.flv': 4,    // Flash video
+            '.webm': 8,   // Web format
+            '.m4v': 9,    // iTunes format
+            '.mpg': 3,    // Older format
+            '.mpeg': 3,   // Older format
+            '.3gp': 2,    // Mobile format
+            '.ts': 6      // Transport stream
+        };
+
+        // Filter video files
+        const videoFiles = files.filter(file => {
+            const extension = path.extname(file.name).toLowerCase();
+            return videoExtensions.hasOwnProperty(extension);
+        });
+
+        if (videoFiles.length === 0) {
+            console.log(`❌ [${streamId}] No video files found`);
+            return null;
+        }
+
+        console.log(`📹 [${streamId}] Found ${videoFiles.length} video files`);
+
+        // Score each video file
+        const scoredFiles = videoFiles.map(file => {
+            const extension = path.extname(file.name).toLowerCase();
+            const basename = path.basename(file.name).toLowerCase();
+            const dirname = path.dirname(file.name).toLowerCase();
+            
+            let score = 0;
+            
+            // Base score from extension
+            score += videoExtensions[extension] || 0;
+            
+            // File size scoring (prefer larger files, but not tiny or extremely large)
+            const sizeMB = file.length / (1024 * 1024);
+            if (sizeMB > 100 && sizeMB < 20000) { // Between 100MB and 20GB
+                score += Math.min(10, sizeMB / 1000); // Up to 10 points for size
+            } else if (sizeMB <= 100) {
+                score -= 5; // Penalize very small files (likely samples/trailers)
+            }
+            
+            // Prefer files not in sample/trailer folders
+            if (dirname.includes('sample') || dirname.includes('trailer') || dirname.includes('preview')) {
+                score -= 15;
+                console.log(`⚠️ [${streamId}] Penalizing sample/trailer: ${file.name}`);
+            }
+            
+            // Penalize sample/trailer files by name
+            if (basename.includes('sample') || basename.includes('trailer') || basename.includes('preview')) {
+                score -= 10;
+                console.log(`⚠️ [${streamId}] Penalizing sample/trailer by name: ${file.name}`);
+            }
+            
+            // Prefer main movie folders
+            if (dirname === '.' || dirname === '' || !dirname.includes('/')) {
+                score += 5; // Bonus for root-level files
+            }
+            
+            // Bonus for common movie indicators
+            if (basename.includes('1080p') || basename.includes('720p') || basename.includes('4k')) {
+                score += 3;
+            }
+            
+            // Bonus for main feature indicators
+            if (basename.includes('feature') || basename.includes('main')) {
+                score += 5;
+            }
+
+            return {
+                file,
+                score,
+                extension,
+                sizeMB: sizeMB.toFixed(2),
+                path: file.name
+            };
+        });
+
+        // Sort by score (highest first)
+        scoredFiles.sort((a, b) => b.score - a.score);
+
+        // Log scoring results
+        console.log(`🏆 [${streamId}] Video file scoring results:`);
+        scoredFiles.forEach((item, index) => {
+            console.log(`  ${index + 1}. ${item.path} (${item.extension}, ${item.sizeMB}MB, score: ${item.score})`);
+        });
+
+        const bestFile = scoredFiles[0].file;
+        console.log(`✅ [${streamId}] Selected best video: ${bestFile.name}`);
+        
+        return bestFile;
+    }
+
+    // Add missing notifyClients method
+    notifyClients(streamId, type, data) {
+        console.log(`📢 [${streamId}] Notifying clients: ${type}`);
+        
+        const message = JSON.stringify({
+            type: type,
+            streamId: streamId,
+            data: data,
+            timestamp: Date.now()
+        });
+
+        // Send to all connected clients
+        let notified = 0;
+        for (const [clientId, connection] of this.clientConnections) {
+            if (connection.ws && connection.ws.readyState === connection.ws.OPEN) {
+                try {
+                    connection.ws.send(message);
+                    notified++;
+                } catch (error) {
+                    console.error(`❌ Failed to notify client ${clientId}:`, error.message);
+                }
+            }
+        }
+        
+        console.log(`📢 [${streamId}] Notified ${notified} clients about ${type}`);
+    }
+
+    // Add missing updateDiskUsage method
+    updateDiskUsage(streamData) {
+        if (!streamData.engine || !streamData.engine.swarm) return;
+
+        const oldUsage = streamData.diskUsage || 0;
+        const newUsage = streamData.engine.swarm.downloaded || 0;
+        
+        // Update total disk usage
+        this.diskUsage = this.diskUsage - oldUsage + newUsage;
+        streamData.diskUsage = newUsage;
+        
+        // Log significant changes
+        if (newUsage - oldUsage > 50 * 1024 * 1024) { // 50MB
+            console.log(`💾 [${streamData.id}] Disk usage: ${this.formatBytes(newUsage)} (Total: ${this.formatBytes(this.diskUsage)})`);
+        }
+    }
+
+    // Add missing destroyStream method
+    destroyStream(streamId, reason = 'manual') {
+        const stream = this.activeStreams.get(streamId);
+        if (!stream) return false;
+
+        console.log(`🗑️ [${streamId}] Destroying stream: ${reason}`);
+        
+        try {
+            // Clear monitoring interval
+            if (stream.monitoringInterval) {
+                clearInterval(stream.monitoringInterval);
+            }
+            
+            // Stop the engine
+            if (stream.engine) {
+                stream.engine.destroy();
+            }
+            
+            // Clean up downloaded files
+            this.cleanupStreamFiles(stream);
+            
+        } catch (e) {
+            console.error(`❌ [${streamId}] Error destroying engine: ${e.message}`);
+        }
+
+        // Update disk usage
+        this.diskUsage -= stream.diskUsage || 0;
+
+        // Remove from client sessions
+        if (this.clientSessions.has(stream.clientId)) {
+            this.clientSessions.get(stream.clientId).delete(streamId);
+            if (this.clientSessions.get(stream.clientId).size === 0) {
+                this.clientSessions.delete(stream.clientId);
+            }
+        }
+
+        this.activeStreams.delete(streamId);
+        this.notifyClients(streamId, 'stream_destroyed', { reason });
+        return true;
+    }
+
+    // Add missing cleanupStreamFiles method
+    cleanupStreamFiles(stream) {
+        if (!stream.path || !fs.existsSync(stream.path)) return;
+
+        try {
+            // Remove the stream directory
+            fs.rmSync(stream.path, { recursive: true, force: true });
+            console.log(`🧹 [${stream.id}] Cleaned up files at ${stream.path}`);
+        } catch (error) {
+            console.error(`❌ [${stream.id}] Failed to cleanup files:`, error.message);
+        }
+    }
+
     // ... rest of your existing methods stay the same ...
 }
 
@@ -570,15 +786,16 @@ app.post('/api/streams', (req, res) => {
             streamId: stream.id,
             status: stream.status,
             createdAt: stream.createdAt,
+            noTimeout: true, // Indicate no timeout
             limits: {
                 maxConcurrentStreams: CONFIG.MAX_CONCURRENT_STREAMS,
-                maxStreamsPerClient: CONFIG.MAX_STREAMS_PER_CLIENT,
-                streamTimeout: CONFIG.STREAM_TIMEOUT
+                maxStreamsPerClient: CONFIG.MAX_STREAMS_PER_CLIENT
+                // REMOVED: streamTimeout (since it doesn't exist in CONFIG)
             }
         });
     } catch (error) {
         console.error('Error creating stream:', error.message);
-        res.status(429).json({ // 429 = Too Many Requests
+        res.status(429).json({
             error: error.message,
             stats: streamManager.getStats()
         });
