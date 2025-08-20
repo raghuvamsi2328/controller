@@ -15,12 +15,13 @@ import fs from 'fs';
 const CONFIG = {
     PORT: process.env.PORT || 6543,
     HOST: process.env.HOST || '0.0.0.0',
-    MAX_CONCURRENT_STREAMS: parseInt(process.env.MAX_STREAMS) || 10, // Reduced from 50
-    MAX_STREAMS_PER_CLIENT: 2, // New: limit per client
-    CLEANUP_INTERVAL: 2 * 60 * 1000, // 2 minutes (more frequent)
-    STREAM_TIMEOUT: 10 * 60 * 1000,  // 10 minutes (shorter timeout)
+    MAX_CONCURRENT_STREAMS: parseInt(process.env.MAX_STREAMS) || 10,
+    MAX_STREAMS_PER_CLIENT: 2,
+    CLEANUP_INTERVAL: 2 * 60 * 1000, // Check every 2 minutes
+    STREAM_INACTIVE_TIMEOUT: 30 * 60 * 1000, // 30 minutes without video access
+    CONNECTION_TIMEOUT: 60 * 60 * 1000, // 1 hour for WebSocket connections
     TEMP_DIR: process.env.TEMP_DIR || '/tmp/torrent-streams',
-    MAX_DISK_USAGE: 5 * 1024 * 1024 * 1024, // 5GB max storage
+    MAX_DISK_USAGE: 5 * 1024 * 1024 * 1024,
 };
 
 // --- Setup ---
@@ -101,13 +102,14 @@ app.use('/api/streams', (req, res, next) => {
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'view')));
 
-// --- Enhanced Stream Manager with Resource Management ---
+// --- Enhanced Stream Manager with Server-Side Control ---
 class StreamManager {
     constructor() {
         this.activeStreams = new Map();
         this.clientSessions = new Map();
+        this.clientConnections = new Map(); // Track WebSocket connections
         this.diskUsage = 0;
-        this.startCleanupInterval();
+        this.startMaintenanceInterval();
         this.ensureTempDir();
     }
 
@@ -116,6 +118,32 @@ class StreamManager {
             fs.mkdirSync(CONFIG.TEMP_DIR, { recursive: true });
             console.log(`📁 Created temp directory: ${CONFIG.TEMP_DIR}`);
         }
+    }
+
+    // Track client connections
+    addClientConnection(clientId, ws) {
+        this.clientConnections.set(clientId, {
+            ws: ws,
+            connectedAt: Date.now(),
+            lastActivity: Date.now(),
+            isActive: true
+        });
+        console.log(`🔌 [${clientId}] Client connection tracked`);
+    }
+
+    // Update client activity
+    updateClientActivity(clientId) {
+        const connection = this.clientConnections.get(clientId);
+        if (connection) {
+            connection.lastActivity = Date.now();
+            connection.isActive = true;
+        }
+    }
+
+    // Remove client connection
+    removeClientConnection(clientId) {
+        this.clientConnections.delete(clientId);
+        console.log(`🔌 [${clientId}] Client connection removed`);
     }
 
     // Check if we can create a new stream
@@ -220,14 +248,34 @@ class StreamManager {
     setupEngineEvents(streamData) {
         const { id, engine } = streamData;
 
+        // Initialize torrent stats
+        streamData.torrentStats = {
+            peers: 0,
+            seeders: 0,
+            leechers: 0,
+            downloadSpeed: 0,
+            uploadSpeed: 0,
+            downloaded: 0,
+            uploaded: 0,
+            progress: 0,
+            ratio: 0,
+            eta: 0,
+            health: 'unknown'
+        };
+
         engine.on('ready', () => {
             console.log(`✅ [${id}] Engine ready`);
             console.log(`📁 [${id}] Total files in torrent: ${engine.files.length}`);
+            console.log(`🌐 [${id}] Torrent info hash: ${engine.torrent.infoHash}`);
+            console.log(`📦 [${id}] Total size: ${(engine.torrent.length / 1024 / 1024).toFixed(2)}MB`);
             
             // Log all files for debugging
             engine.files.forEach((file, index) => {
                 console.log(`📄 [${id}] File ${index}: ${file.name} (${(file.length / 1024 / 1024).toFixed(2)}MB)`);
             });
+            
+            // Start torrent monitoring
+            this.startTorrentMonitoring(streamData);
             
             const videoFile = this.findBestVideoFile(engine.files, id);
 
@@ -235,11 +283,6 @@ class StreamManager {
                 streamData.status = 'error';
                 streamData.error = 'No suitable video file found';
                 console.log(`❌ [${id}] No video file found`);
-                console.log(`📋 [${id}] Available files:`, engine.files.map(f => ({ 
-                    name: f.name, 
-                    size: `${(f.length / 1024 / 1024).toFixed(2)}MB`,
-                    extension: path.extname(f.name).toLowerCase()
-                })));
                 this.notifyClients(id, 'stream_error', { error: 'No suitable video file found' });
                 return;
             }
@@ -252,7 +295,9 @@ class StreamManager {
                 duration: null,
                 bitrate: null,
                 container: path.extname(videoFile.name).toLowerCase(),
-                isInFolder: videoFile.name.includes('/') || videoFile.name.includes('\\')
+                isInFolder: videoFile.name.includes('/') || videoFile.name.includes('\\'),
+                torrentHash: engine.torrent.infoHash,
+                totalTorrentSize: engine.torrent.length
             };
 
             console.log(`✅ [${id}] Video ready: ${videoFile.name} (${(videoFile.length / 1024 / 1024).toFixed(2)} MB)`);
@@ -261,9 +306,21 @@ class StreamManager {
             this.notifyClients(id, 'stream_ready', streamData.metadata);
         });
 
-        // Monitor download progress and disk usage
-        engine.on('download', () => {
+        // Enhanced download monitoring
+        engine.on('download', (pieceIndex) => {
             this.updateDiskUsage(streamData);
+            this.updateTorrentStats(streamData);
+        });
+
+        // Peer connection events
+        engine.on('peer', (peer) => {
+            console.log(`👥 [${id}] New peer connected: ${peer.remoteAddress}`);
+            this.updateTorrentStats(streamData);
+        });
+
+        // Upload events
+        engine.on('upload', (pieceIndex, offset, length) => {
+            this.updateTorrentStats(streamData);
         });
 
         engine.on('error', (err) => {
@@ -274,247 +331,267 @@ class StreamManager {
         });
     }
 
-    findBestVideoFile(files, streamId) {
-        console.log(`🔍 [${streamId}] Searching for best video file among ${files.length} files`);
+    // Add comprehensive torrent monitoring
+    startTorrentMonitoring(streamData) {
+        const { id } = streamData;
         
-        // Define video extensions with priority (higher score = better)
-        const videoExtensions = {
-            '.mp4': 10,   // Best compatibility
-            '.mkv': 9,    // High quality, good support
-            '.avi': 7,    // Good compatibility
-            '.mov': 6,    // Apple format
-            '.wmv': 5,    // Windows format
-            '.flv': 4,    // Flash video
-            '.webm': 8,   // Web format
-            '.m4v': 9,    // iTunes format
-            '.mpg': 3,    // Older format
-            '.mpeg': 3,   // Older format
-            '.3gp': 2,    // Mobile format
-            '.ts': 6      // Transport stream
-        };
-
-        // Filter video files
-        const videoFiles = files.filter(file => {
-            const extension = path.extname(file.name).toLowerCase();
-            return videoExtensions.hasOwnProperty(extension);
-        });
-
-        if (videoFiles.length === 0) {
-            console.log(`❌ [${streamId}] No video files found`);
-            return null;
-        }
-
-        console.log(`📹 [${streamId}] Found ${videoFiles.length} video files`);
-
-        // Score each video file
-        const scoredFiles = videoFiles.map(file => {
-            const extension = path.extname(file.name).toLowerCase();
-            const basename = path.basename(file.name).toLowerCase();
-            const dirname = path.dirname(file.name).toLowerCase();
+        streamData.monitoringInterval = setInterval(() => {
+            this.updateTorrentStats(streamData);
             
-            let score = 0;
-            
-            // Base score from extension
-            score += videoExtensions[extension] || 0;
-            
-            // File size scoring (prefer larger files, but not tiny or extremely large)
-            const sizeMB = file.length / (1024 * 1024);
-            if (sizeMB > 100 && sizeMB < 20000) { // Between 100MB and 20GB
-                score += Math.min(10, sizeMB / 1000); // Up to 10 points for size
-            } else if (sizeMB <= 100) {
-                score -= 5; // Penalize very small files (likely samples/trailers)
-            }
-            
-            // Prefer files not in sample/trailer folders
-            if (dirname.includes('sample') || dirname.includes('trailer') || dirname.includes('preview')) {
-                score -= 15;
-                console.log(`⚠️ [${streamId}] Penalizing sample/trailer: ${file.name}`);
-            }
-            
-            // Penalize sample/trailer files by name
-            if (basename.includes('sample') || basename.includes('trailer') || basename.includes('preview')) {
-                score -= 10;
-                console.log(`⚠️ [${streamId}] Penalizing sample/trailer by name: ${file.name}`);
-            }
-            
-            // Prefer main movie folders
-            if (dirname === '.' || dirname === '' || !dirname.includes('/')) {
-                score += 5; // Bonus for root-level files
-            }
-            
-            // Bonus for common movie indicators
-            if (basename.includes('1080p') || basename.includes('720p') || basename.includes('4k')) {
-                score += 3;
-            }
-            
-            // Bonus for main feature indicators
-            if (basename.includes('feature') || basename.includes('main')) {
-                score += 5;
-            }
-
-            return {
-                file,
-                score,
-                extension,
-                sizeMB: sizeMB.toFixed(2),
-                path: file.name
-            };
-        });
-
-        // Sort by score (highest first)
-        scoredFiles.sort((a, b) => b.score - a.score);
-
-        // Log scoring results
-        console.log(`🏆 [${streamId}] Video file scoring results:`);
-        scoredFiles.forEach((item, index) => {
-            console.log(`  ${index + 1}. ${item.path} (${item.extension}, ${item.sizeMB}MB, score: ${item.score})`);
-        });
-
-        const bestFile = scoredFiles[0].file;
-        console.log(`✅ [${streamId}] Selected best video: ${bestFile.name}`);
-        
-        return bestFile;
+            // Send periodic updates to clients
+            this.notifyClients(id, 'torrent_stats', streamData.torrentStats);
+        }, 2000); // Update every 2 seconds
     }
 
-    updateDiskUsage(streamData) {
-        try {
-            if (fs.existsSync(streamData.path)) {
-                const stats = fs.statSync(streamData.path);
-                const newUsage = stats.size;
-                
-                // Update global disk usage
-                this.diskUsage = this.diskUsage - streamData.diskUsage + newUsage;
-                streamData.diskUsage = newUsage;
-                
-                // Log significant changes
-                if (newUsage > streamData.diskUsage + 10 * 1024 * 1024) { // Every 10MB
-                    console.log(`💾 [${streamData.id}] Downloaded: ${(newUsage / 1024 / 1024).toFixed(2)}MB`);
-                }
-            }
-        } catch (error) {
-            console.error(`Error checking disk usage for ${streamData.id}:`, error.message);
+    updateTorrentStats(streamData) {
+        const { engine } = streamData;
+        
+        if (!engine || !engine.swarm) return;
+
+        const swarm = engine.swarm;
+        const torrent = engine.torrent;
+        
+        // Calculate basic stats
+        const downloaded = swarm.downloaded;
+        const uploaded = swarm.uploaded;
+        const totalLength = torrent.length;
+        const progress = totalLength > 0 ? (downloaded / totalLength) * 100 : 0;
+        
+        // Peer statistics
+        const peers = swarm.wires || [];
+        const activePeers = peers.filter(peer => !peer.peerChoking).length;
+        const seeders = peers.filter(peer => peer.peerPieces && peer.peerPieces.buffer.toString('hex').indexOf('00') === -1).length;
+        const leechers = peers.length - seeders;
+        
+        // Speed calculations (bytes per second)
+        const downloadSpeed = swarm.downloadSpeed() || 0;
+        const uploadSpeed = swarm.uploadSpeed() || 0;
+        
+        // ETA calculation
+        const remaining = totalLength - downloaded;
+        const eta = downloadSpeed > 0 ? remaining / downloadSpeed : 0;
+        
+        // Health calculation (based on seeders/leechers ratio and download speed)
+        let health = 'unknown';
+        if (seeders > 10) {
+            health = 'excellent';
+        } else if (seeders > 5) {
+            health = 'good';
+        } else if (seeders > 1) {
+            health = 'fair';
+        } else if (seeders === 1) {
+            health = 'poor';
+        } else {
+            health = 'critical';
         }
+        
+        // Update stats
+        streamData.torrentStats = {
+            peers: peers.length,
+            activePeers: activePeers,
+            seeders: seeders,
+            leechers: leechers,
+            downloadSpeed: downloadSpeed,
+            uploadSpeed: uploadSpeed,
+            downloaded: downloaded,
+            uploaded: uploaded,
+            progress: Math.round(progress * 100) / 100,
+            ratio: downloaded > 0 ? uploaded / downloaded : 0,
+            eta: eta,
+            health: health,
+            totalSize: totalLength,
+            remaining: remaining,
+            // Additional detailed stats
+            pieces: {
+                total: torrent.pieces ? torrent.pieces.length : 0,
+                downloaded: swarm.downloaded ? Math.floor(downloaded / torrent.pieceLength) : 0
+            },
+            bandwidth: {
+                downloadSpeedFormatted: this.formatBytes(downloadSpeed) + '/s',
+                uploadSpeedFormatted: this.formatBytes(uploadSpeed) + '/s'
+            }
+        };
+
+        // Log significant changes
+        if (streamData.lastLoggedProgress === undefined || 
+            Math.abs(progress - streamData.lastLoggedProgress) >= 5) {
+            console.log(`📊 [${streamData.id}] Progress: ${progress.toFixed(1)}%, Peers: ${peers.length} (${seeders}S/${leechers}L), Speed: ${this.formatBytes(downloadSpeed)}/s, Health: ${health}`);
+            streamData.lastLoggedProgress = progress;
+        }
+    }
+
+    // Helper function to format bytes
+    formatBytes(bytes) {
+        if (bytes === 0) return '0 B';
+        const k = 1024;
+        const sizes = ['B', 'KB', 'MB', 'GB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
     }
 
     getStream(streamId) {
         const stream = this.activeStreams.get(streamId);
         if (stream) {
+            // Track ALL access activity server-side
             stream.lastAccessed = Date.now();
+            stream.accessCount = (stream.accessCount || 0) + 1;
+            
+            // Update client activity when accessing streams
+            this.updateClientActivity(stream.clientId);
+            
+            // Track video streaming specifically
+            if (stream.status === 'ready') {
+                stream.lastVideoAccess = Date.now();
+                stream.isActivelyStreaming = true;
+                console.log(`📺 [${streamId}] Video access tracked server-side`);
+            }
         }
         return stream;
     }
 
-    destroyStream(streamId, reason = 'manual') {
-        const stream = this.activeStreams.get(streamId);
-        if (!stream) return false;
-
-        console.log(`🗑️ [${streamId}] Destroying stream (${reason})`);
-        
-        try {
-            // Stop the engine
-            stream.engine.destroy();
-            
-            // Clean up downloaded files
-            this.cleanupStreamFiles(stream);
-            
-        } catch (e) {
-            console.error(`Error destroying engine: ${e.message}`);
-        }
-
-        // Update disk usage
-        this.diskUsage -= stream.diskUsage;
-
-        // Remove from client sessions
-        if (this.clientSessions.has(stream.clientId)) {
-            this.clientSessions.get(stream.clientId).delete(streamId);
-            if (this.clientSessions.get(stream.clientId).size === 0) {
-                this.clientSessions.delete(stream.clientId);
-            }
-        }
-
-        this.activeStreams.delete(streamId);
-        this.notifyClients(streamId, 'stream_destroyed', { reason });
-        return true;
-    }
-
-    cleanupStreamFiles(stream) {
-        try {
-            if (fs.existsSync(stream.path)) {
-                fs.rmSync(stream.path, { recursive: true, force: true });
-                console.log(`🧹 [${stream.id}] Cleaned up files: ${stream.path}`);
-            }
-        } catch (error) {
-            console.error(`Error cleaning up files for ${stream.id}:`, error.message);
-        }
-    }
-
-    destroyClientStreams(clientId) {
-        const clientStreams = this.clientSessions.get(clientId);
-        if (!clientStreams) return 0;
-
-        let destroyed = 0;
-        for (const streamId of clientStreams) {
-            if (this.destroyStream(streamId, 'client_disconnect')) {
-                destroyed++;
-            }
-        }
-        return destroyed;
-    }
-
-    notifyClients(streamId, event, data) {
-        const message = JSON.stringify({
-            type: event,
-            streamId,
-            data,
-            timestamp: Date.now()
-        });
-
-        wss.clients.forEach(client => {
-            if (client.readyState === client.OPEN) {
-                try {
-                    client.send(message);
-                } catch (e) {
-                    console.error('Error sending WebSocket message:', e.message);
-                }
-            }
-        });
-    }
-
-    startCleanupInterval() {
+    // Comprehensive maintenance with smart cleanup rules
+    startMaintenanceInterval() {
         setInterval(() => {
             const now = Date.now();
-            let cleaned = 0;
-
-            for (const [streamId, stream] of this.activeStreams) {
-                const age = now - stream.lastAccessed;
-                if (age > CONFIG.STREAM_TIMEOUT) {
-                    this.destroyStream(streamId, 'timeout');
-                    cleaned++;
-                }
+            
+            // 1. Check and cleanup inactive WebSocket connections
+            this.cleanupInactiveConnections(now);
+            
+            // 2. Check and cleanup inactive streams
+            this.cleanupInactiveStreams(now);
+            
+            // 3. Emergency disk space cleanup
+            if (this.diskUsage > CONFIG.MAX_DISK_USAGE * 0.95) {
+                console.log(`⚠️ Critical disk usage! Emergency cleanup...`);
+                this.emergencyDiskCleanup();
             }
-
-            if (cleaned > 0) {
-                console.log(`🧹 Cleaned up ${cleaned} inactive streams`);
-            }
-
-            // Log current resource usage
-            console.log(`📊 Resource usage: ${this.activeStreams.size}/${CONFIG.MAX_CONCURRENT_STREAMS} streams, ${(this.diskUsage / 1024 / 1024).toFixed(2)}MB disk`);
+            
+            // 4. Log status
+            this.logSystemStatus();
             
         }, CONFIG.CLEANUP_INTERVAL);
     }
 
-    getStats() {
-        return {
-            activeStreams: this.activeStreams.size,
-            maxStreams: CONFIG.MAX_CONCURRENT_STREAMS,
-            connectedClients: this.clientSessions.size,
-            totalConnections: wss.clients.size,
-            diskUsageBytes: this.diskUsage,
-            diskUsageMB: Math.round(this.diskUsage / 1024 / 1024),
-            maxDiskUsageMB: Math.round(CONFIG.MAX_DISK_USAGE / 1024 / 1024),
-            uptime: process.uptime()
-        };
+    cleanupInactiveConnections(now) {
+        let disconnectedClients = 0;
+        
+        for (const [clientId, connection] of this.clientConnections) {
+            const timeSinceActivity = now - connection.lastActivity;
+            
+            // Close connections that have been inactive too long
+            if (timeSinceActivity > CONFIG.CONNECTION_TIMEOUT) {
+                console.log(`⏰ [${clientId}] Connection timeout (${Math.round(timeSinceActivity / 1000 / 60)}min inactive)`);
+                
+                // Close the WebSocket connection
+                if (connection.ws && connection.ws.readyState === connection.ws.OPEN) {
+                    connection.ws.close(1000, 'Inactivity timeout');
+                }
+                
+                // Cleanup streams for this client
+                this.destroyClientStreams(clientId);
+                this.removeClientConnection(clientId);
+                disconnectedClients++;
+            }
+        }
+        
+        if (disconnectedClients > 0) {
+            console.log(`🧹 Cleaned up ${disconnectedClients} inactive client connections`);
+        }
     }
+
+    cleanupInactiveStreams(now) {
+        let cleanedStreams = 0;
+        
+        for (const [streamId, stream] of this.activeStreams) {
+            const timeSinceAccess = now - stream.lastAccessed;
+            const timeSinceVideoAccess = now - (stream.lastVideoAccess || 0);
+            
+            let shouldDestroy = false;
+            let reason = '';
+            
+            // Check if client connection still exists
+            const clientConnection = this.clientConnections.get(stream.clientId);
+            if (!clientConnection) {
+                shouldDestroy = true;
+                reason = 'client_disconnected';
+            }
+            // Check for video streaming inactivity
+            else if (stream.status === 'ready' && stream.isActivelyStreaming) {
+                if (timeSinceVideoAccess > CONFIG.STREAM_INACTIVE_TIMEOUT) {
+                    shouldDestroy = true;
+                    reason = 'video_streaming_inactive';
+                }
+            }
+            // Check for general stream inactivity
+            else if (timeSinceAccess > CONFIG.STREAM_INACTIVE_TIMEOUT) {
+                shouldDestroy = true;
+                reason = 'general_inactivity';
+            }
+            
+            if (shouldDestroy) {
+                console.log(`⏰ [${streamId}] Destroying stream: ${reason} (inactive: ${Math.round(timeSinceAccess / 1000 / 60)}min)`);
+                this.destroyStream(streamId, reason);
+                cleanedStreams++;
+            }
+        }
+        
+        if (cleanedStreams > 0) {
+            console.log(`🧹 Cleaned up ${cleanedStreams} inactive streams`);
+        }
+    }
+
+    logSystemStatus() {
+        console.log(`📊 System Status:`);
+        console.log(`   Active Streams: ${this.activeStreams.size}/${CONFIG.MAX_CONCURRENT_STREAMS}`);
+        console.log(`   Connected Clients: ${this.clientConnections.size}`);
+        console.log(`   Disk Usage: ${(this.diskUsage / 1024 / 1024).toFixed(2)}MB`);
+        
+        // Log individual streams
+        for (const [streamId, stream] of this.activeStreams) {
+            const age = Math.round((Date.now() - stream.createdAt) / 1000 / 60);
+            const lastAccess = Math.round((Date.now() - stream.lastAccessed) / 1000 / 60);
+            const isStreaming = stream.isActivelyStreaming ? '📺' : '⏸️';
+            console.log(`   ${isStreaming} [${streamId}] ${stream.status}, Age: ${age}min, Last: ${lastAccess}min`);
+        }
+    }
+
+    // Enhanced video streaming tracking
+    markVideoStreamingActive(streamId) {
+        const stream = this.activeStreams.get(streamId);
+        if (stream) {
+            stream.lastVideoAccess = Date.now();
+            stream.isActivelyStreaming = true;
+            this.updateClientActivity(stream.clientId);
+            
+            // Reset any pending destruction
+            if (stream.destructionTimer) {
+                clearTimeout(stream.destructionTimer);
+                stream.destructionTimer = null;
+            }
+        }
+    }
+
+    // Mark streaming as potentially inactive (after connection ends)
+    markVideoStreamingInactive(streamId, delay = 300000) { // 5 minute grace period
+        const stream = this.activeStreams.get(streamId);
+        if (stream) {
+            console.log(`📺 [${streamId}] Video streaming ended, ${delay/1000}s grace period before marking inactive`);
+            
+            // Clear any existing timer
+            if (stream.destructionTimer) {
+                clearTimeout(stream.destructionTimer);
+            }
+            
+            // Set a grace period before marking truly inactive
+            stream.destructionTimer = setTimeout(() => {
+                stream.isActivelyStreaming = false;
+                console.log(`⏸️ [${streamId}] Marked as not actively streaming`);
+            }, delay);
+        }
+    }
+
+    // Rest of your existing methods stay the same...
+    // createStream, setupEngineEvents, destroyStream, etc.
 }
 
 const streamManager = new StreamManager();
@@ -613,7 +690,7 @@ app.get('/api/streams', (req, res) => {
     });
 });
 
-// --- Video Streaming Endpoint ---
+// --- Enhanced Video Streaming Endpoint with Network Optimization ---
 app.get('/stream/:streamId', (req, res) => {
     const { streamId } = req.params;
     const stream = streamManager.getStream(streamId);
@@ -628,14 +705,24 @@ app.get('/stream/:streamId', (req, res) => {
     const fileSize = videoFile.length;
     const rangeHeader = req.headers.range;
     const extension = path.extname(videoFile.name).toLowerCase();
+    const userAgent = req.headers['user-agent'] || '';
+    const isLargeFile = fileSize > 1024 * 1024 * 1024; // > 1GB
 
     console.log(`📺 [${streamId}] Streaming request: ${videoFile.name} (${extension}) from ${req.ip}`);
+    console.log(`📊 [${streamId}] File size: ${(fileSize / 1024 / 1024).toFixed(2)}MB, Large: ${isLargeFile}`);
 
-    // Set appropriate content type based on file extension
+    // Enhanced content type detection
     let contentType = 'video/mp4'; // Default
     switch (extension) {
         case '.mkv':
-            contentType = 'video/x-matroska';
+            // Special handling for MKV files
+            if (userAgent.includes('Chrome')) {
+                contentType = 'video/x-matroska';
+            } else if (userAgent.includes('Firefox')) {
+                contentType = 'video/webm'; // Firefox sometimes prefers this
+            } else {
+                contentType = 'video/x-matroska';
+            }
             break;
         case '.avi':
             contentType = 'video/x-msvideo';
@@ -660,16 +747,38 @@ app.get('/stream/:streamId', (req, res) => {
             break;
     }
 
-    // Handle range requests (crucial for all video formats)
+    // Calculate optimal chunk size based on file size and connection
+    let chunkSize = 1024 * 1024; // 1MB default
+    if (isLargeFile) {
+        chunkSize = 2 * 1024 * 1024; // 2MB for large files
+    }
+    if (extension === '.mkv') {
+        chunkSize = 512 * 1024; // 512KB for MKV (more compatible)
+    }
+
+    // Handle range requests with optimizations
     if (rangeHeader) {
         const ranges = rangeParser(fileSize, rangeHeader);
 
         if (ranges === -1 || ranges === -2) {
+            console.log(`❌ [${streamId}] Invalid range header: ${rangeHeader}`);
             return res.status(416).json({ error: 'Invalid range' });
         }
 
-        const { start, end } = ranges[0];
+        let { start, end } = ranges[0];
+        
+        // Optimize end point for better streaming
+        if (end === fileSize - 1 && start === 0) {
+            // First request - give a good chunk
+            end = Math.min(start + chunkSize - 1, fileSize - 1);
+        } else if (end - start > chunkSize * 2) {
+            // Limit chunk size for better responsiveness
+            end = start + chunkSize - 1;
+        }
+
         const contentLength = end - start + 1;
+
+        console.log(`📤 [${streamId}] Serving range: ${start}-${end}/${fileSize} (${(contentLength / 1024).toFixed(2)}KB)`);
 
         res.status(206);
         res.setHeader('Content-Length', contentLength);
@@ -677,38 +786,65 @@ app.get('/stream/:streamId', (req, res) => {
         res.setHeader('Accept-Ranges', 'bytes');
         res.setHeader('Content-Type', contentType);
         
-        // Enhanced headers for better MKV/video support
+        // Enhanced headers for better streaming
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.setHeader('Access-Control-Allow-Headers', 'Range');
-        res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('Cache-Control', 'public, max-age=3600'); // Cache for 1 hour
+        res.setHeader('Connection', 'keep-alive');
         
-        // For MKV files, add specific headers
+        // MKV-specific optimizations
         if (extension === '.mkv') {
             res.setHeader('X-Content-Type-Options', 'nosniff');
+            res.setHeader('Accept-Encoding', 'identity'); // Disable compression for MKV
+        }
+        
+        // Large file optimizations
+        if (isLargeFile) {
+            res.setHeader('Transfer-Encoding', 'chunked');
         }
 
-        const streamInstance = videoFile.createReadStream({ start, end });
+        const streamInstance = videoFile.createReadStream({ 
+            start, 
+            end,
+            highWaterMark: 64 * 1024 // 64KB buffer for smoother streaming
+        });
         
         streamInstance.on('error', (err) => {
-            console.error(`❌ [${streamId}] Stream error:`, err.message);
+            console.error(`❌ [${streamId}] Stream error (${start}-${end}):`, err.message);
             if (!res.headersSent) {
                 res.status(500).end();
             }
         });
 
+        streamInstance.on('data', (chunk) => {
+            // Optional: Track download progress
+            stream.downloadProgress = (stream.downloadProgress || 0) + chunk.length;
+        });
+
         streamInstance.pipe(res);
     } else {
+        // Non-range request - serve whole file with optimizations
+        console.log(`📤 [${streamId}] Serving full file: ${(fileSize / 1024 / 1024).toFixed(2)}MB`);
+
         res.status(200);
         res.setHeader('Content-Length', fileSize);
         res.setHeader('Content-Type', contentType);
         res.setHeader('Accept-Ranges', 'bytes');
         res.setHeader('Access-Control-Allow-Origin', '*');
-        res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('Cache-Control', 'public, max-age=3600');
+        res.setHeader('Connection', 'keep-alive');
 
-        const streamInstance = videoFile.createReadStream();
+        if (extension === '.mkv') {
+            res.setHeader('X-Content-Type-Options', 'nosniff');
+            res.setHeader('Accept-Encoding', 'identity');
+        }
+
+        const streamInstance = videoFile.createReadStream({
+            highWaterMark: isLargeFile ? 128 * 1024 : 64 * 1024 // Larger buffer for big files
+        });
         
         streamInstance.on('error', (err) => {
-            console.error(`❌ [${streamId}] Stream error:`, err.message);
+            console.error(`❌ [${streamId}] Full stream error:`, err.message);
             if (!res.headersSent) {
                 res.status(500).end();
             }
@@ -730,6 +866,9 @@ wss.on('connection', (ws, req) => {
         clientId,
         timestamp: Date.now()
     }));
+
+    // Track this client connection
+    streamManager.addClientConnection(clientId, ws);
 
     ws.on('message', (message) => {
         try {
@@ -767,6 +906,8 @@ wss.on('connection', (ws, req) => {
     ws.on('close', () => {
         console.log(`🔌 Client disconnected: ${clientId}`);
         const destroyed = streamManager.destroyClientStreams(clientId);
+        streamManager.removeClientConnection(clientId); // Remove connection tracking
+
         if (destroyed > 0) {
             console.log(`🧹 Cleaned up ${destroyed} streams for client ${clientId}`);
         }

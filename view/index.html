@@ -121,6 +121,124 @@
         }
         .test-success { background: #d4edda; color: #155724; }
         .test-error { background: #f8d7da; color: #721c24; }
+
+        /* Add these new styles */
+        .network-stats {
+            background: #e8f4fd;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 10px 0;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 10px;
+        }
+        .network-item {
+            text-align: center;
+            padding: 10px;
+            background: white;
+            border-radius: 3px;
+        }
+        .network-value {
+            font-size: 18px;
+            font-weight: bold;
+            color: #1976d2;
+        }
+        .network-label {
+            font-size: 11px;
+            color: #666;
+        }
+        .buffer-indicator {
+            height: 20px;
+            background: #f0f0f0;
+            border-radius: 10px;
+            overflow: hidden;
+            margin: 10px 0;
+        }
+        .buffer-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #4caf50, #8bc34a);
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+        .quality-selector {
+            margin: 10px 0;
+        }
+        .quality-btn {
+            margin: 2px;
+            padding: 5px 10px;
+            font-size: 12px;
+        }
+
+        .torrent-stats {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 10px 0;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 10px;
+        }
+        .torrent-item {
+            text-align: center;
+            padding: 10px;
+            background: white;
+            border-radius: 3px;
+            border-left: 4px solid #007bff;
+        }
+        .torrent-value {
+            font-size: 16px;
+            font-weight: bold;
+            color: #333;
+        }
+        .torrent-label {
+            font-size: 11px;
+            color: #666;
+            margin-top: 2px;
+        }
+        .health-excellent { border-left-color: #28a745; }
+        .health-good { border-left-color: #17a2b8; }
+        .health-fair { border-left-color: #ffc107; }
+        .health-poor { border-left-color: #fd7e14; }
+        .health-critical { border-left-color: #dc3545; }
+        
+        .progress-bar {
+            width: 100%;
+            height: 20px;
+            background: #e9ecef;
+            border-radius: 10px;
+            overflow: hidden;
+            margin: 10px 0;
+        }
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #007bff, #0056b3);
+            width: 0%;
+            transition: width 0.5s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 12px;
+            font-weight: bold;
+        }
+        
+        .peer-list {
+            background: #f8f9fa;
+            padding: 10px;
+            border-radius: 5px;
+            margin: 10px 0;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        .peer-item {
+            padding: 5px;
+            margin: 2px 0;
+            background: white;
+            border-radius: 3px;
+            font-size: 12px;
+            display: flex;
+            justify-content: space-between;
+        }
     </style>
 </head>
 <body>
@@ -179,6 +297,92 @@
         
         <!-- Logs -->
         <div class="logs" id="logs"></div>
+
+        <!-- Network Stats -->
+        <div class="network-stats">
+            <div class="network-item">
+                <div class="network-value" id="downloadSpeed">0</div>
+                <div class="network-label">Download (KB/s)</div>
+            </div>
+            <div class="network-item">
+                <div class="network-value" id="totalDownloaded">0</div>
+                <div class="network-label">Downloaded (MB)</div>
+            </div>
+            <div class="network-item">
+                <div class="network-value" id="bufferHealth">0</div>
+                <div class="network-label">Buffer Health (%)</div>
+            </div>
+            <div class="network-item">
+                <div class="network-value" id="networkLatency">0</div>
+                <div class="network-label">Latency (ms)</div>
+            </div>
+            <div class="network-item">
+                <div class="network-value" id="connectionType">Unknown</div>
+                <div class="network-label">Connection</div>
+            </div>
+            <div class="network-item">
+                <div class="network-value" id="videoState">Idle</div>
+                <div class="network-label">Video State</div>
+            </div>
+        </div>
+
+        <!-- Buffer Indicator -->
+        <div class="buffer-indicator">
+            <div class="buffer-fill" id="bufferFill"></div>
+        </div>
+
+        <!-- Quality Selector -->
+        <div class="quality-selector">
+            <label>Streaming Quality:</label>
+            <button class="quality-btn" onclick="setStreamingQuality('auto')">Auto</button>
+            <button class="quality-btn" onclick="setStreamingQuality('fast')">Fast (Lower Quality)</button>
+            <button class="quality-btn" onclick="setStreamingQuality('high')">High Quality</button>
+        </div>
+
+        <!-- Torrent Monitoring -->
+        <div class="torrent-stats" id="torrentStats" style="display: none;">
+            <div class="torrent-item">
+                <div class="torrent-value" id="torrentPeers">0</div>
+                <div class="torrent-label">Total Peers</div>
+            </div>
+            <div class="torrent-item">
+                <div class="torrent-value" id="torrentSeeders">0</div>
+                <div class="torrent-label">Seeders</div>
+            </div>
+            <div class="torrent-item">
+                <div class="torrent-value" id="torrentLeechers">0</div>
+                <div class="torrent-label">Leechers</div>
+            </div>
+            <div class="torrent-item" id="torrentHealthItem">
+                <div class="torrent-value" id="torrentHealth">Unknown</div>
+                <div class="torrent-label">Health</div>
+            </div>
+            <div class="torrent-item">
+                <div class="torrent-value" id="torrentDownSpeed">0</div>
+                <div class="torrent-label">Download Speed</div>
+            </div>
+            <div class="torrent-item">
+                <div class="torrent-value" id="torrentUpSpeed">0</div>
+                <div class="torrent-label">Upload Speed</div>
+            </div>
+            <div class="torrent-item">
+                <div class="torrent-value" id="torrentProgress">0%</div>
+                <div class="torrent-label">Progress</div>
+            </div>
+            <div class="torrent-item">
+                <div class="torrent-value" id="torrentETA">∞</div>
+                <div class="torrent-label">ETA</div>
+            </div>
+            <div class="torrent-item">
+                <div class="torrent-value" id="torrentRatio">0.0</div>
+                <div class="torrent-label">Share Ratio</div>
+            </div>
+        </div>
+
+        <!-- Progress bar -->
+        <div class="progress-bar" id="torrentProgressBar" style="display: none;">
+            <div class="progress-fill" id="torrentProgressFill">0%</div>
+        </div>
     </div>
 
     <script>
@@ -333,6 +537,7 @@
                 
                 log(`Stream ${currentStreamId} destroy request sent`, 'success');
                 
+                hideTorrentStats();
                 currentStreamId = null;
                 currentStream = null;
                 videoPlayer.src = '';
@@ -395,11 +600,36 @@
             if (!currentStreamId) return;
             
             const streamUrl = `/stream/${currentStreamId}`;
-            log(`Starting video playback: ${streamUrl}`);
+            log(`Starting optimized video playback: ${streamUrl}`, 'info');
             
-            videoPlayer.src = streamUrl;
-            videoPlayer.play().catch(e => {
+            // Apply network-aware optimizations
+            const video = videoPlayer;
+            
+            // Set quality-based preload
+            setStreamingQuality(streamingQuality);
+            
+            // Add network-specific optimizations
+            if (networkStats.connectionType === 'slow-2g' || networkStats.connectionType === '2g') {
+                video.preload = 'none';
+                log('Slow connection detected: Minimal preloading', 'info');
+            }
+            
+            video.src = streamUrl;
+            
+            // Enhanced error handling with retry logic
+            video.play().catch(e => {
                 log(`Playback error: ${e.message}`, 'error');
+                
+                // Retry with different approach for MKV files
+                if (currentStream?.metadata?.container === '.mkv') {
+                    log('MKV detected: Retrying with different headers', 'info');
+                    setTimeout(() => {
+                        video.load();
+                        video.play().catch(retryError => {
+                            log(`MKV retry failed: ${retryError.message}`, 'error');
+                        });
+                    }, 2000);
+                }
             });
         }
 
@@ -458,6 +688,7 @@
                         case 'connected':
                             clientId = msg.clientId;
                             log(`Connected with client ID: ${clientId}`, 'success');
+                            startNetworkMonitoring(); // Start monitoring when connected
                             break;
                             
                         case 'stream_created':
@@ -473,14 +704,17 @@
                             destroyStreamBtn.disabled = false;
                             updateStatus(true, 'Stream initializing...');
                             
-                            // Start very light fallback polling as backup (only if WebSocket fails)
-                            pollTimeoutId = setTimeout(fallbackPoll, 15000); // Wait 15 seconds before fallback
+                            // Show torrent monitoring
+                            document.getElementById('torrentStats').style.display = 'grid';
+                            document.getElementById('torrentProgressBar').style.display = 'block';
+                            
+                            // Start light fallback polling as backup
+                            pollTimeoutId = setTimeout(fallbackPoll, 15000);
                             break;
                             
                         case 'stream_ready':
                             log(`🎉 Stream ready notification: ${JSON.stringify(msg.data)}`, 'success');
                             
-                            // Cancel fallback polling since WebSocket worked
                             if (pollTimeoutId) {
                                 clearTimeout(pollTimeoutId);
                                 pollTimeoutId = null;
@@ -491,16 +725,32 @@
                                     streamId: msg.streamId,
                                     status: 'ready',
                                     metadata: msg.data
-                            });
-                            startVideoPlayback();
-                            updateStatus(true, 'Stream ready - Playing video');
+                                });
+                                startVideoPlayback();
+                                updateStatus(true, 'Stream ready - Playing video');
+                            }
+                            break;
+                            
+                        case 'torrent_stats':
+                            // Handle real-time torrent statistics
+                            updateTorrentStats(msg.data);
+                            break;
+                            
+                        case 'download_progress':
+                            // Handle download progress updates
+                            if (msg.data) {
+                                const { downloaded, speed } = msg.data;
+                                networkStats.totalDownloaded = Math.round(downloaded / 1024 / 1024);
+                                networkStats.downloadSpeed = Math.round(speed / 1024);
+                                
+                                document.getElementById('totalDownloaded').textContent = networkStats.totalDownloaded;
+                                document.getElementById('downloadSpeed').textContent = networkStats.downloadSpeed;
                             }
                             break;
                             
                         case 'stream_error':
                             log(`❌ Stream error notification: ${msg.data?.error}`, 'error');
                             
-                            // Cancel fallback polling
                             if (pollTimeoutId) {
                                 clearTimeout(pollTimeoutId);
                                 pollTimeoutId = null;
@@ -520,6 +770,7 @@
                             log(`🗑️ Stream destroyed notification: ${msg.streamId}`, 'info');
                             
                             if (msg.streamId === currentStreamId) {
+                                hideTorrentStats();
                                 currentStreamId = null;
                                 currentStream = null;
                                 videoPlayer.src = '';
@@ -546,15 +797,23 @@
 
         // Initialize
         document.addEventListener('DOMContentLoaded', () => {
-            log('Initializing WebSocket-First Video Streamer');
+            log('Initializing WebSocket-First Video Streamer with Network Monitoring');
+            setupVideoPlayerMonitoring();
             connectWebSocket();
             
             // Auto-refresh stats every 30 seconds
             setInterval(refreshStats, 30000);
+            
+            // Set default quality
+            setStreamingQuality('auto');
         });
 
         // Cleanup on page unload
         window.addEventListener('beforeunload', () => {
+            if (networkMonitorInterval) {
+                clearInterval(networkMonitorInterval);
+            }
+            
             if (currentStreamId) {
                 // Quick cleanup via WebSocket
                 if (ws && ws.readyState === WebSocket.OPEN) {
@@ -564,10 +823,248 @@
                     }));
                 }
             }
+        });
+
+        // Update torrent statistics display
+        function updateTorrentStats(stats) {
+            torrentStats = stats;
             
-            if (pollTimeoutId) {
-                clearTimeout(pollTimeoutId);
+            // Update basic stats
+            document.getElementById('torrentPeers').textContent = stats.peers || 0;
+            document.getElementById('torrentSeeders').textContent = stats.seeders || 0;
+            document.getElementById('torrentLeechers').textContent = stats.leechers || 0;
+            
+            // Update speeds with formatting
+            document.getElementById('torrentDownSpeed').textContent = stats.bandwidth?.downloadSpeedFormatted || '0 B/s';
+            document.getElementById('torrentUpSpeed').textContent = stats.bandwidth?.uploadSpeedFormatted || '0 B/s';
+            
+            // Update progress
+            const progress = stats.progress || 0;
+            document.getElementById('torrentProgress').textContent = `${progress.toFixed(1)}%`;
+            
+            // Update progress bar
+            const progressFill = document.getElementById('torrentProgressFill');
+            progressFill.style.width = `${progress}%`;
+            progressFill.textContent = `${progress.toFixed(1)}%`;
+            
+            // Update health with styling
+            const health = stats.health || 'unknown';
+            const healthElement = document.getElementById('torrentHealth');
+            const healthItem = document.getElementById('torrentHealthItem');
+            
+            healthElement.textContent = health.charAt(0).toUpperCase() + health.slice(1);
+            
+            // Remove all health classes
+            healthItem.classList.remove('health-excellent', 'health-good', 'health-fair', 'health-poor', 'health-critical');
+            healthItem.classList.add(`health-${health}`);
+            
+            // Update ETA
+            const eta = stats.eta || 0;
+            document.getElementById('torrentETA').textContent = eta > 0 ? formatTime(eta) : '∞';
+            
+            // Update ratio
+            document.getElementById('torrentRatio').textContent = (stats.ratio || 0).toFixed(2);
+            
+            // Log interesting events
+            if (stats.peers !== torrentStats.peers) {
+                log(`Peer count changed: ${stats.peers} (${stats.seeders}S/${stats.leechers}L)`, 'info');
             }
+            
+            if (stats.health !== torrentStats.health) {
+                log(`Torrent health changed: ${stats.health}`, 'info');
+            }
+        }
+
+        // Helper function to format time
+        function formatTime(seconds) {
+            if (seconds < 60) return `${Math.round(seconds)}s`;
+            if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
+            if (seconds < 86400) return `${Math.round(seconds / 3600)}h`;
+            return `${Math.round(seconds / 86400)}d`;
+        }
+
+        // Hide torrent stats when no active stream
+        function hideTorrentStats() {
+            document.getElementById('torrentStats').style.display = 'none';
+            document.getElementById('torrentProgressBar').style.display = 'none';
+        }
+
+        // Enhanced destroy function
+        async function destroyCurrentStream() {
+            if (!currentStreamId) {
+                log('No active stream to destroy', 'error');
+                return;
+            }
+
+            try {
+                // Cancel any ongoing polling
+                if (pollTimeoutId) {
+                    clearTimeout(pollTimeoutId);
+                    pollTimeoutId = null;
+                }
+
+                // Send destroy request via WebSocket
+                ws.send(JSON.stringify({
+                    type: 'destroy_stream',
+                    streamId: currentStreamId
+                }));
+
+                // Also call API as backup
+                await apiCall(`/streams/${currentStreamId}`, {
+                    method: 'DELETE'
+                });
+                
+                log(`Stream ${currentStreamId} destroy request sent`, 'success');
+                
+                hideTorrentStats();
+                currentStreamId = null;
+                currentStream = null;
+                videoPlayer.src = '';
+                
+                createStreamBtn.disabled = false;
+                destroyStreamBtn.disabled = true;
+                
+                streamInfo.classList.remove('visible');
+                updateStatus(true, 'Connected to server');
+                
+            } catch (error) {
+                log(`Failed to destroy stream: ${error.message}`, 'error');
+            }
+        }
+
+        // --- Enhanced Video Streaming Endpoint with Server-Side Activity Tracking ---
+        app.get('/stream/:streamId', (req, res) => {
+            const { streamId } = req.params;
+            const stream = streamManager.getStream(streamId); // This tracks access automatically
+
+            if (!stream || stream.status !== 'ready' || !stream.videoFile) {
+                return res.status(404).json({
+                    error: 'Stream not ready or not found'
+                });
+            }
+
+            // Mark as actively streaming
+            streamManager.markVideoStreamingActive(streamId);
+
+            const videoFile = stream.videoFile;
+            const fileSize = videoFile.length;
+            const rangeHeader = req.headers.range;
+            const extension = path.extname(videoFile.name).toLowerCase();
+            
+            console.log(`📺 [${streamId}] Video streaming active - server tracking`);
+
+            // ... existing streaming logic ...
+
+            // Track when streaming session ends
+            res.on('finish', () => {
+                console.log(`📺 [${streamId}] Streaming session finished`);
+                // Give 5 minute grace period in case user is just pausing/seeking
+                streamManager.markVideoStreamingInactive(streamId, 300000);
+            });
+
+            res.on('close', () => {
+                console.log(`📺 [${streamId}] Streaming connection closed`);
+                // Shorter grace period for closed connections
+                streamManager.markVideoStreamingInactive(streamId, 180000); // 3 minutes
+            });
+
+            res.on('error', (err) => {
+                console.error(`❌ [${streamId}] Streaming error:`, err.message);
+                streamManager.markVideoStreamingInactive(streamId, 60000); // 1 minute on error
+            });
+
+            // ... rest of your existing streaming code ...
+        });
+
+        // --- Enhanced WebSocket with Server-Side Connection Tracking ---
+        wss.on('connection', (ws, req) => {
+            const clientId = uuidv4();
+            ws.clientId = clientId;
+            
+            console.log(`🔌 Client connected: ${clientId} from ${req.socket.remoteAddress}`);
+            
+            // Track connection server-side
+            streamManager.addClientConnection(clientId, ws);
+            
+            ws.send(JSON.stringify({
+                type: 'connected',
+                clientId,
+                timestamp: Date.now(),
+                serverControlled: true // Indicate server handles everything
+            }));
+
+            // Ping mechanism to detect client activity
+            const pingInterval = setInterval(() => {
+                if (ws.readyState === ws.OPEN) {
+                    ws.ping();
+                    streamManager.updateClientActivity(clientId);
+                } else {
+                    clearInterval(pingInterval);
+                }
+            }, 30000); // Ping every 30 seconds
+
+            ws.on('pong', () => {
+                streamManager.updateClientActivity(clientId);
+            });
+
+            ws.on('message', (message) => {
+                streamManager.updateClientActivity(clientId); // Track any message as activity
+                
+                try {
+                    const data = JSON.parse(message);
+                    console.log(`📨 WebSocket message from ${clientId}:`, data.type);
+                    
+                    switch (data.type) {
+                        case 'create_stream':
+                            handleCreateStreamWS(data, ws, clientId);
+                            break;
+                            
+                        case 'destroy_stream':
+                            handleDestroyStreamWS(data, ws, clientId);
+                            break;
+                            
+                        case 'activity_ping':
+                            // Client can send this to indicate it's still active
+                            streamManager.updateClientActivity(clientId);
+                            ws.send(JSON.stringify({
+                                type: 'activity_pong',
+                                timestamp: Date.now()
+                            }));
+                            break;
+                            
+                        case 'ping':
+                            ws.send(JSON.stringify({
+                                type: 'pong',
+                                timestamp: Date.now()
+                            }));
+                            break;
+                            
+                        default:
+                            console.log(`❓ Unknown WebSocket message type: ${data.type}`);
+                    }
+                } catch (e) {
+                    console.error('Invalid WebSocket message:', e.message);
+                }
+            });
+
+            ws.on('close', () => {
+                console.log(`🔌 Client disconnected: ${clientId}`);
+                clearInterval(pingInterval);
+                
+                // Cleanup streams and connection tracking
+                const destroyed = streamManager.destroyClientStreams(clientId);
+                streamManager.removeClientConnection(clientId);
+                
+                if (destroyed > 0) {
+                    console.log(`🧹 Cleaned up ${destroyed} streams for disconnected client ${clientId}`);
+                }
+            });
+
+            ws.on('error', (err) => {
+                console.error(`WebSocket error for ${clientId}:`, err.message);
+                clearInterval(pingInterval);
+                streamManager.removeClientConnection(clientId);
+            });
         });
     </script>
 </body>
