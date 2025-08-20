@@ -11,15 +11,15 @@ import peerflix from 'peerflix';
 import { v4 as uuidv4 } from 'uuid';
 import fs from 'fs';
 
-// --- Configuration ---
+// --- Configuration (Remove timeout settings) ---
 const CONFIG = {
     PORT: process.env.PORT || 6543,
     HOST: process.env.HOST || '0.0.0.0',
     MAX_CONCURRENT_STREAMS: parseInt(process.env.MAX_STREAMS) || 10,
     MAX_STREAMS_PER_CLIENT: 2,
-    CLEANUP_INTERVAL: 2 * 60 * 1000, // Check every 2 minutes
-    STREAM_INACTIVE_TIMEOUT: 30 * 60 * 1000, // 30 minutes without video access
-    CONNECTION_TIMEOUT: 60 * 60 * 1000, // 1 hour for WebSocket connections
+    CLEANUP_INTERVAL: 5 * 60 * 1000, // Only for logging/monitoring, not cleanup
+    // REMOVED: STREAM_INACTIVE_TIMEOUT
+    // REMOVED: CONNECTION_TIMEOUT
     TEMP_DIR: process.env.TEMP_DIR || '/tmp/torrent-streams',
     MAX_DISK_USAGE: 5 * 1024 * 1024 * 1024,
 };
@@ -107,9 +107,10 @@ class StreamManager {
     constructor() {
         this.activeStreams = new Map();
         this.clientSessions = new Map();
-        this.clientConnections = new Map(); // Track WebSocket connections
+        this.clientConnections = new Map();
         this.diskUsage = 0;
-        this.startMaintenanceInterval();
+        this.startupTime = Date.now();
+        this.startMonitoringInterval(); // Renamed - only for status logging
         this.ensureTempDir();
     }
 
@@ -450,98 +451,24 @@ class StreamManager {
     }
 
     // Comprehensive maintenance with smart cleanup rules
-    startMaintenanceInterval() {
+    startMonitoringInterval() {
         setInterval(() => {
-            const now = Date.now();
+            // ONLY log status and emergency disk cleanup - NO timeout-based cleanup
             
-            // 1. Check and cleanup inactive WebSocket connections
-            this.cleanupInactiveConnections(now);
-            
-            // 2. Check and cleanup inactive streams
-            this.cleanupInactiveStreams(now);
-            
-            // 3. Emergency disk space cleanup
+            // 1. Emergency disk space cleanup ONLY (when 95% full)
             if (this.diskUsage > CONFIG.MAX_DISK_USAGE * 0.95) {
                 console.log(`⚠️ Critical disk usage! Emergency cleanup...`);
                 this.emergencyDiskCleanup();
             }
             
-            // 4. Log status
+            // 2. Log status (no cleanup)
             this.logSystemStatus();
             
         }, CONFIG.CLEANUP_INTERVAL);
     }
 
-    cleanupInactiveConnections(now) {
-        let disconnectedClients = 0;
-        
-        for (const [clientId, connection] of this.clientConnections) {
-            const timeSinceActivity = now - connection.lastActivity;
-            
-            // Close connections that have been inactive too long
-            if (timeSinceActivity > CONFIG.CONNECTION_TIMEOUT) {
-                console.log(`⏰ [${clientId}] Connection timeout (${Math.round(timeSinceActivity / 1000 / 60)}min inactive)`);
-                
-                // Close the WebSocket connection
-                if (connection.ws && connection.ws.readyState === connection.ws.OPEN) {
-                    connection.ws.close(1000, 'Inactivity timeout');
-                }
-                
-                // Cleanup streams for this client
-                this.destroyClientStreams(clientId);
-                this.removeClientConnection(clientId);
-                disconnectedClients++;
-            }
-        }
-        
-        if (disconnectedClients > 0) {
-            console.log(`🧹 Cleaned up ${disconnectedClients} inactive client connections`);
-        }
-    }
-
-    cleanupInactiveStreams(now) {
-        let cleanedStreams = 0;
-        
-        for (const [streamId, stream] of this.activeStreams) {
-            const timeSinceAccess = now - stream.lastAccessed;
-            const timeSinceVideoAccess = now - (stream.lastVideoAccess || 0);
-            
-            let shouldDestroy = false;
-            let reason = '';
-            
-            // Check if client connection still exists
-            const clientConnection = this.clientConnections.get(stream.clientId);
-            if (!clientConnection) {
-                shouldDestroy = true;
-                reason = 'client_disconnected';
-            }
-            // Check for video streaming inactivity
-            else if (stream.status === 'ready' && stream.isActivelyStreaming) {
-                if (timeSinceVideoAccess > CONFIG.STREAM_INACTIVE_TIMEOUT) {
-                    shouldDestroy = true;
-                    reason = 'video_streaming_inactive';
-                }
-            }
-            // Check for general stream inactivity
-            else if (timeSinceAccess > CONFIG.STREAM_INACTIVE_TIMEOUT) {
-                shouldDestroy = true;
-                reason = 'general_inactivity';
-            }
-            
-            if (shouldDestroy) {
-                console.log(`⏰ [${streamId}] Destroying stream: ${reason} (inactive: ${Math.round(timeSinceAccess / 1000 / 60)}min)`);
-                this.destroyStream(streamId, reason);
-                cleanedStreams++;
-            }
-        }
-        
-        if (cleanedStreams > 0) {
-            console.log(`🧹 Cleaned up ${cleanedStreams} inactive streams`);
-        }
-    }
-
     logSystemStatus() {
-        console.log(`📊 System Status:`);
+        console.log(`📊 System Status (NO TIMEOUTS):`);
         console.log(`   Active Streams: ${this.activeStreams.size}/${CONFIG.MAX_CONCURRENT_STREAMS}`);
         console.log(`   Connected Clients: ${this.clientConnections.size}`);
         console.log(`   Disk Usage: ${(this.diskUsage / 1024 / 1024).toFixed(2)}MB`);
@@ -551,11 +478,35 @@ class StreamManager {
             const age = Math.round((Date.now() - stream.createdAt) / 1000 / 60);
             const lastAccess = Math.round((Date.now() - stream.lastAccessed) / 1000 / 60);
             const isStreaming = stream.isActivelyStreaming ? '📺' : '⏸️';
-            console.log(`   ${isStreaming} [${streamId}] ${stream.status}, Age: ${age}min, Last: ${lastAccess}min`);
+            console.log(`   ${isStreaming} [${streamId}] ${stream.status}, Age: ${age}min, Last: ${lastAccess}min (PERMANENT)`);
         }
     }
 
-    // Enhanced video streaming tracking
+    emergencyDiskCleanup() {
+        const streams = Array.from(this.activeStreams.entries());
+        streams.sort(([,a], [,b]) => a.lastAccessed - b.lastAccessed);
+        
+        let cleaned = 0;
+        const targetSize = CONFIG.MAX_DISK_USAGE * 0.8;
+        
+        for (const [streamId, stream] of streams) {
+            if (this.diskUsage <= targetSize) break;
+            
+            // Only clean streams that haven't been accessed in the last 2 minutes (very short)
+            const timeSinceAccess = Date.now() - stream.lastAccessed;
+            if (timeSinceAccess > 2 * 60 * 1000) { // Only 2 minutes for emergency
+                console.log(`🆘 [${streamId}] Emergency cleanup due to disk space (ONLY reason for cleanup)`);
+                this.destroyStream(streamId, 'emergency_disk_cleanup');
+                cleaned++;
+            }
+        }
+        
+        if (cleaned > 0) {
+            console.log(`🧹 Emergency cleanup: removed ${cleaned} streams`);
+        }
+    }
+
+    // Simplified markVideoStreamingActive (no timeout logic)
     markVideoStreamingActive(streamId) {
         const stream = this.activeStreams.get(streamId);
         if (stream) {
@@ -563,35 +514,31 @@ class StreamManager {
             stream.isActivelyStreaming = true;
             this.updateClientActivity(stream.clientId);
             
-            // Reset any pending destruction
-            if (stream.destructionTimer) {
-                clearTimeout(stream.destructionTimer);
-                stream.destructionTimer = null;
-            }
+            // NO destruction timer logic
+            console.log(`📺 [${streamId}] Video streaming active (NO TIMEOUT)`);
         }
     }
 
-    // Mark streaming as potentially inactive (after connection ends)
-    markVideoStreamingInactive(streamId, delay = 300000) { // 5 minute grace period
-        const stream = this.activeStreams.get(streamId);
-        if (stream) {
-            console.log(`📺 [${streamId}] Video streaming ended, ${delay/1000}s grace period before marking inactive`);
-            
-            // Clear any existing timer
-            if (stream.destructionTimer) {
-                clearTimeout(stream.destructionTimer);
+    // Simplified destroyClientStreams - only called on actual disconnect
+    destroyClientStreams(clientId) {
+        const clientStreams = this.clientSessions.get(clientId);
+        if (!clientStreams) return 0;
+
+        let destroyed = 0;
+        console.log(`🔌 [${clientId}] Client disconnected - cleaning up their streams`);
+        
+        for (const streamId of clientStreams) {
+            if (this.destroyStream(streamId, 'client_disconnect')) {
+                destroyed++;
             }
-            
-            // Set a grace period before marking truly inactive
-            stream.destructionTimer = setTimeout(() => {
-                stream.isActivelyStreaming = false;
-                console.log(`⏸️ [${streamId}] Marked as not actively streaming`);
-            }, delay);
         }
+        
+        // Clean up client session
+        this.clientSessions.delete(clientId);
+        return destroyed;
     }
 
-    // Rest of your existing methods stay the same...
-    // createStream, setupEngineEvents, destroyStream, etc.
+    // ... rest of your existing methods stay the same ...
 }
 
 const streamManager = new StreamManager();

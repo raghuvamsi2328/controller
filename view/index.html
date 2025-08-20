@@ -403,6 +403,30 @@
         const destroyStreamBtn = document.getElementById('destroyStreamBtn');
         const streamInfo = document.getElementById('streamInfo');
 
+        // Add these missing variables to your frontend JavaScript
+        let networkStats = {
+            downloadSpeed: 0,
+            totalDownloaded: 0,
+            lastDownloadTime: Date.now(),
+            lastDownloadAmount: 0,
+            bufferHealth: 0,
+            latency: 0,
+            connectionType: 'unknown'
+        };
+        let streamingQuality = 'auto';
+        let networkMonitorInterval = null;
+        let torrentStats = {
+            peers: 0,
+            seeders: 0,
+            leechers: 0,
+            downloadSpeed: 0,
+            uploadSpeed: 0,
+            progress: 0,
+            health: 'unknown',
+            eta: 0,
+            ratio: 0
+        };
+
         // Logging function
         function log(message, type = 'info') {
             const timestamp = new Date().toLocaleTimeString();
@@ -825,6 +849,137 @@
             }
         });
 
+        // Enhanced video player event monitoring
+        function setupVideoPlayerMonitoring() {
+            const video = videoPlayer;
+            
+            // Buffer monitoring
+            video.addEventListener('progress', () => {
+                updateBufferHealth();
+            });
+            
+            video.addEventListener('waiting', () => {
+                log('Video buffering...', 'info');
+                document.getElementById('videoState').textContent = 'Buffering';
+            });
+            
+            video.addEventListener('playing', () => {
+                log('Video playing', 'success');
+                document.getElementById('videoState').textContent = 'Playing';
+            });
+            
+            video.addEventListener('pause', () => {
+                log('Video paused', 'info');
+                document.getElementById('videoState').textContent = 'Paused';
+            });
+            
+            video.addEventListener('ended', () => {
+                log('Video ended', 'info');
+                document.getElementById('videoState').textContent = 'Ended';
+            });
+            
+            video.addEventListener('stalled', () => {
+                log('Video stalled - network issue detected', 'error');
+                document.getElementById('videoState').textContent = 'Stalled';
+            });
+            
+            video.addEventListener('error', (e) => {
+                log(`Video error: ${e.message || 'Unknown error'}`, 'error');
+                document.getElementById('videoState').textContent = 'Error';
+            });
+            
+            video.addEventListener('loadstart', () => {
+                log('Video load started', 'info');
+                document.getElementById('videoState').textContent = 'Loading';
+            });
+            
+            video.addEventListener('canplay', () => {
+                log('Video can start playing', 'success');
+                document.getElementById('videoState').textContent = 'Ready';
+            });
+        }
+
+        // Network monitoring functions
+        function detectNetworkConnection() {
+            if ('connection' in navigator) {
+                const connection = navigator.connection;
+                let type = connection.effectiveType || 'unknown';
+                let speed = connection.downlink || 0;
+                
+                document.getElementById('connectionType').textContent = `${type} (${speed}Mbps)`;
+                networkStats.connectionType = type;
+            }
+        }
+
+        function updateBufferHealth() {
+            const video = videoPlayer;
+            if (video.buffered.length > 0) {
+                const currentTime = video.currentTime;
+                const bufferedEnd = video.buffered.end(video.buffered.length - 1);
+                const bufferAhead = bufferedEnd - currentTime;
+                const bufferPercentage = Math.min(100, (bufferAhead / 30) * 100);
+                
+                networkStats.bufferHealth = Math.round(bufferPercentage);
+                document.getElementById('bufferHealth').textContent = networkStats.bufferHealth;
+                document.getElementById('bufferFill').style.width = `${bufferPercentage}%`;
+            }
+        }
+
+        async function measureLatency() {
+            try {
+                const start = Date.now();
+                await fetch('/api/health', { method: 'HEAD' });
+                const latency = Date.now() - start;
+                
+                networkStats.latency = latency;
+                document.getElementById('networkLatency').textContent = latency;
+                
+                return latency;
+            } catch (error) {
+                log(`Latency test failed: ${error.message}`, 'error');
+                return 0;
+            }
+        }
+
+        function startNetworkMonitoring() {
+            if (networkMonitorInterval) {
+                clearInterval(networkMonitorInterval);
+            }
+            
+            networkMonitorInterval = setInterval(async () => {
+                await measureLatency();
+                detectNetworkConnection();
+                updateBufferHealth();
+            }, 10000);
+            
+            measureLatency();
+            detectNetworkConnection();
+        }
+
+        function setStreamingQuality(quality) {
+            streamingQuality = quality;
+            log(`Streaming quality set to: ${quality}`, 'info');
+            
+            const video = videoPlayer;
+            switch (quality) {
+                case 'fast':
+                    video.preload = 'metadata';
+                    break;
+                case 'high':
+                    video.preload = 'auto';
+                    break;
+                case 'auto':
+                default:
+                    video.preload = 'metadata';
+                    break;
+            }
+            
+            document.querySelectorAll('.quality-btn').forEach(btn => {
+                btn.style.background = btn.textContent.toLowerCase().includes(quality) ? '#007bff' : '';
+                btn.style.color = btn.textContent.toLowerCase().includes(quality) ? 'white' : '';
+            });
+        }
+
         // Update torrent statistics display
         function updateTorrentStats(stats) {
             torrentStats = stats;
@@ -931,141 +1086,6 @@
                 log(`Failed to destroy stream: ${error.message}`, 'error');
             }
         }
-
-        // --- Enhanced Video Streaming Endpoint with Server-Side Activity Tracking ---
-        app.get('/stream/:streamId', (req, res) => {
-            const { streamId } = req.params;
-            const stream = streamManager.getStream(streamId); // This tracks access automatically
-
-            if (!stream || stream.status !== 'ready' || !stream.videoFile) {
-                return res.status(404).json({
-                    error: 'Stream not ready or not found'
-                });
-            }
-
-            // Mark as actively streaming
-            streamManager.markVideoStreamingActive(streamId);
-
-            const videoFile = stream.videoFile;
-            const fileSize = videoFile.length;
-            const rangeHeader = req.headers.range;
-            const extension = path.extname(videoFile.name).toLowerCase();
-            
-            console.log(`📺 [${streamId}] Video streaming active - server tracking`);
-
-            // ... existing streaming logic ...
-
-            // Track when streaming session ends
-            res.on('finish', () => {
-                console.log(`📺 [${streamId}] Streaming session finished`);
-                // Give 5 minute grace period in case user is just pausing/seeking
-                streamManager.markVideoStreamingInactive(streamId, 300000);
-            });
-
-            res.on('close', () => {
-                console.log(`📺 [${streamId}] Streaming connection closed`);
-                // Shorter grace period for closed connections
-                streamManager.markVideoStreamingInactive(streamId, 180000); // 3 minutes
-            });
-
-            res.on('error', (err) => {
-                console.error(`❌ [${streamId}] Streaming error:`, err.message);
-                streamManager.markVideoStreamingInactive(streamId, 60000); // 1 minute on error
-            });
-
-            // ... rest of your existing streaming code ...
-        });
-
-        // --- Enhanced WebSocket with Server-Side Connection Tracking ---
-        wss.on('connection', (ws, req) => {
-            const clientId = uuidv4();
-            ws.clientId = clientId;
-            
-            console.log(`🔌 Client connected: ${clientId} from ${req.socket.remoteAddress}`);
-            
-            // Track connection server-side
-            streamManager.addClientConnection(clientId, ws);
-            
-            ws.send(JSON.stringify({
-                type: 'connected',
-                clientId,
-                timestamp: Date.now(),
-                serverControlled: true // Indicate server handles everything
-            }));
-
-            // Ping mechanism to detect client activity
-            const pingInterval = setInterval(() => {
-                if (ws.readyState === ws.OPEN) {
-                    ws.ping();
-                    streamManager.updateClientActivity(clientId);
-                } else {
-                    clearInterval(pingInterval);
-                }
-            }, 30000); // Ping every 30 seconds
-
-            ws.on('pong', () => {
-                streamManager.updateClientActivity(clientId);
-            });
-
-            ws.on('message', (message) => {
-                streamManager.updateClientActivity(clientId); // Track any message as activity
-                
-                try {
-                    const data = JSON.parse(message);
-                    console.log(`📨 WebSocket message from ${clientId}:`, data.type);
-                    
-                    switch (data.type) {
-                        case 'create_stream':
-                            handleCreateStreamWS(data, ws, clientId);
-                            break;
-                            
-                        case 'destroy_stream':
-                            handleDestroyStreamWS(data, ws, clientId);
-                            break;
-                            
-                        case 'activity_ping':
-                            // Client can send this to indicate it's still active
-                            streamManager.updateClientActivity(clientId);
-                            ws.send(JSON.stringify({
-                                type: 'activity_pong',
-                                timestamp: Date.now()
-                            }));
-                            break;
-                            
-                        case 'ping':
-                            ws.send(JSON.stringify({
-                                type: 'pong',
-                                timestamp: Date.now()
-                            }));
-                            break;
-                            
-                        default:
-                            console.log(`❓ Unknown WebSocket message type: ${data.type}`);
-                    }
-                } catch (e) {
-                    console.error('Invalid WebSocket message:', e.message);
-                }
-            });
-
-            ws.on('close', () => {
-                console.log(`🔌 Client disconnected: ${clientId}`);
-                clearInterval(pingInterval);
-                
-                // Cleanup streams and connection tracking
-                const destroyed = streamManager.destroyClientStreams(clientId);
-                streamManager.removeClientConnection(clientId);
-                
-                if (destroyed > 0) {
-                    console.log(`🧹 Cleaned up ${destroyed} streams for disconnected client ${clientId}`);
-                }
-            });
-
-            ws.on('error', (err) => {
-                console.error(`WebSocket error for ${clientId}:`, err.message);
-                clearInterval(pingInterval);
-                streamManager.removeClientConnection(clientId);
-            });
-        });
     </script>
 </body>
 </html>
