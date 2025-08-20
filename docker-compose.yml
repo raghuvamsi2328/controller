@@ -5,9 +5,9 @@ services:
     container_name: torrent-streamer
     restart: unless-stopped
     
-    # Build the Docker image from the Dockerfile in the 'controller' directory
+    # Build the Docker image from the Dockerfile in the project root
     build:
-      context: ./controller
+      context: .
       dockerfile: Dockerfile
       
     # Map the host port to the container port
