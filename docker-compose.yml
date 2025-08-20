@@ -5,11 +5,12 @@ services:
     container_name: torrent-streamer
     restart: unless-stopped
     
-    # Build the Docker image from the Dockerfile in the project root
+    # Use host networking to bypass Docker's network isolation
+    network_mode: host
+    
     build:
       context: .
       dockerfile: Dockerfile
       
-    # Map the host port to the container port
-    ports:
-      - "6543:6543"
+    # When using host networking, port mapping is not needed
+    # The container will use the host's port 6543 directly

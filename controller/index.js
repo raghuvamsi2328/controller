@@ -55,7 +55,14 @@ const PORT = 6543;
 // Add error handler for WebTorrent client
 client.on('error', (err) => {
     console.error('🔥 WebTorrent client error:', err.message);
+    console.error('🔥 Error stack:', err.stack);
 });
+
+// Test WebTorrent client immediately after creation
+console.log('🔍 Testing WebTorrent client...');
+console.log('🔍 Client ready:', client.ready);
+console.log('🔍 Client DHT enabled:', client.dht ? 'YES' : 'NO');
+console.log('🔍 Client tracker config:', JSON.stringify(client.tracker, null, 2));
 
 // Use CORS to allow requests from other domains
 app.use(cors());
@@ -259,6 +266,14 @@ app.get('/stream/:sessionId', (req, res) => {
 
     // Pipe the data to the response.
     stream.pipe(res);
+});
+
+// Add this test endpoint before your WebSocket logic
+app.get('/test-stream', (req, res) => {
+    // Create a simple test video response
+    res.setHeader('Content-Type', 'video/mp4');
+    res.setHeader('Accept-Ranges', 'bytes');
+    res.status(200).send('This is a test stream endpoint. Your server is working correctly.');
 });
 
 
