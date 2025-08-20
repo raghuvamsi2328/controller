@@ -21,18 +21,31 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
-// Configure WebTorrent client for Docker environment
+// More aggressive Docker-friendly WebTorrent configuration
 const client = new WebTorrent({
-    // Disable DHT and PEX to make it more stable in containers
+    // Completely disable DHT and PEX (peer discovery methods that require UDP)
     dht: false,
+    lsd: false,  // Disable Local Service Discovery
+    pex: false,  // Disable Peer Exchange
+    
+    // Enable web seeds (HTTP/HTTPS based downloading)
     webSeeds: true,
-    // Use only HTTP trackers, avoid UDP in Docker
+    
+    // Force use of WebSocket trackers only (no UDP)
     tracker: {
-        announce: [],
+        wrtc: false,  // Disable WebRTC in server environment
+        announce: [
+            // Use only WebSocket trackers that work well in Docker
+            'wss://tracker.openwebtorrent.com',
+            'wss://tracker.btorrent.xyz',
+            'wss://tracker.fastcast.nz'
+        ],
         getAnnounceOpts: () => ({
-            numwant: 50,
+            numwant: 20,
             uploaded: 0,
-            downloaded: 0
+            downloaded: 0,
+            left: 0,
+            compact: 1
         })
     }
 });
@@ -52,7 +65,7 @@ app.use(express.static(path.join(__dirname, 'view')));
 
 // --- State ---
 const activeTorrents = new Map();
-const defaultMagnetLink = 'magnet:?xt=urn:btih:dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c';
+const defaultMagnetLink = 'magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10&dn=Sintel&tr=wss%3A%2F%2Ftracker.btorrent.xyz&tr=wss%3A%2F%2Ftracker.openwebtorrent.com&tr=wss%3A%2F%2Ftracker.fastcast.nz';
 
 // --- Functions ---
 function startStream(magnetLink, ws) {
@@ -81,10 +94,15 @@ function startStream(magnetLink, ws) {
             // Add torrent with more conservative options for Docker
             torrent = client.add(magnetLink, { 
                 destroyStoreOnDestroy: true,
-                maxConns: 10,  // Reduced from 55
-                downloadLimit: 1024 * 1024 * 5,  // 5 MB/s limit
-                uploadLimit: 0,  // Disable uploading to save resources
-                strategy: 'sequential'  // Download sequentially for streaming
+                maxConns: 5,  // Very conservative connection limit
+                downloadLimit: 1024 * 1024 * 2,  // 2 MB/s limit
+                uploadLimit: 0,  // Completely disable uploading
+                strategy: 'sequential',
+                announce: [
+                    // Add reliable WebSocket trackers
+                    'wss://tracker.openwebtorrent.com',
+                    'wss://tracker.btorrent.xyz'
+                ]
             });
             
             console.log(`🔍 [DEBUG] client.add completed successfully`);
