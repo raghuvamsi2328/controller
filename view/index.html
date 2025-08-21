@@ -1370,11 +1370,6 @@
                 () => clearInterval(bufferCheckInterval), { once: true });
         }
 
-        // In torrent event handlers
-        if (!torrent || !torrent.files || !Array.isArray(torrent.files)) {
-            console.error(`[${id}] Invalid torrent structure`);
-            return;
-        }
     </script>
 </body>
 </html>
