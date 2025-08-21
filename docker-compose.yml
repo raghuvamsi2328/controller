@@ -16,3 +16,6 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=6543
+      # WebTorrent network ports for Docker/Portainer
+      - DHT_PORT=6881
+      - TRACKER_PORT=8000
