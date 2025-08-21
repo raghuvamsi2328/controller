@@ -798,12 +798,17 @@
             ws = new WebSocket(`ws://${window.location.hostname}:6543`);
 
             ws.onopen = () => {
+                reconnectAttempts = 0;
                 log('WebSocket connection established', 'success');
                 updateStatus(true);
             };
 
-            ws.onclose = () => {
-                log('WebSocket connection closed. Attempting to reconnect...', 'error');
+            ws.onclose = (event) => {
+                // Check if the close was clean or not
+                const wasClean = event.wasClean;
+                const code = event.code;
+                
+                log(`WebSocket connection closed${wasClean ? ' cleanly' : ''} with code ${code}. Attempting to reconnect...`, 'error');
                 updateStatus(false);
                 
                 // Cancel any ongoing polling
@@ -812,12 +817,17 @@
                     pollTimeoutId = null;
                 }
                 
-                setTimeout(connectWebSocket, 3000);
+                // Use exponential backoff for reconnection to avoid overwhelming the server
+                const reconnectDelay = Math.min(3000 * Math.pow(1.5, reconnectAttempts), 30000);
+                reconnectAttempts++;
+                
+                log(`Will reconnect in ${Math.round(reconnectDelay/1000)} seconds (attempt ${reconnectAttempts})`, 'info');
+                setTimeout(connectWebSocket, reconnectDelay);
             };
 
             ws.onerror = (err) => {
-                log('WebSocket error occurred', 'error');
-                console.error('WebSocket error:', err);
+                console.error('WebSocket error details:', err);
+                log(`WebSocket error: ${err.type}`, 'error');
             };
 
             ws.onmessage = (event) => {
@@ -1037,43 +1047,33 @@
                             '.mp4': ['video/mp4', 'video/x-mp4', 'application/octet-stream'],
                             '.avi': ['video/x-msvideo', 'video/avi', 'application/octet-stream']
                         };
-                        
                         const alternatives = alternativeMimeTypes[container] || ['application/octet-stream'];
-                        log(`Trying alternative MIME types: ${alternatives.join(', ')}`, 'info');
-                        
-                        // Try each alternative
                         let attemptIndex = 0;
                         function tryAlternative() {
                             if (attemptIndex >= alternatives.length) {
                                 log('All recovery attempts failed', 'error');
                                 return;
                             }
-                            
                             const mimeType = alternatives[attemptIndex++];
                             log(`Trying MIME type: ${mimeType}`, 'info');
-                            
                             video.innerHTML = '';
                             const source = document.createElement('source');
                             source.src = `/stream/${currentStreamId}`;
                             source.type = mimeType;
                             video.appendChild(source);
                             video.load();
-                            
                             // If this one fails too, try next alternative
                             const errorHandler = function() {
                                 video.removeEventListener('error', errorHandler);
                                 tryAlternative();
                             };
                             video.addEventListener('error', errorHandler);
-                            
                             // If it starts playing, success
                             video.addEventListener('canplay', function() {
                                 video.removeEventListener('error', errorHandler);
                                 log(`Recovery successful with MIME type: ${mimeType}`, 'success');
                             }, { once: true });
                         }
-                        
-                        // Start the recovery process
                         tryAlternative();
                         break;
                 }
@@ -1368,6 +1368,12 @@
             videoElement.addEventListener('ended', () => clearInterval(bufferCheckInterval), { once: true });
             document.getElementById('destroyStreamBtn').addEventListener('click', 
                 () => clearInterval(bufferCheckInterval), { once: true });
+        }
+
+        // In torrent event handlers
+        if (!torrent || !torrent.files || !Array.isArray(torrent.files)) {
+            console.error(`[${id}] Invalid torrent structure`);
+            return;
         }
     </script>
 </body>
