@@ -11,7 +11,7 @@ import peerflix from 'peerflix';
 import WebTorrent from 'webtorrent';
 import { v4 as uuidv4 } from 'uuid';
 import fs from 'fs';
-import Torrenter from 'torrenter';
+import torrentStream from 'torrent-stream'; // Replace Torrenter with torrent-stream
 import { spawn } from 'child_process'; // Add for FFmpeg
 import { promisify } from 'util';
 import { pipeline } from 'stream';
@@ -235,16 +235,16 @@ class StreamManager {
                     streamData.onWebTorrentReady(torrent);
                 }
             });
-        } else if (engineType === 'torrenter') {
-            // Torrenter engine setup
-            engine = new Torrenter();
-            engineInstance = 'pending';
-            engine.add(magnetLink, { path: streamPath }, (torrent) => {
-                engineInstance = torrent;
-                if (streamData.onTorrenterReady) {
-                    streamData.onTorrenterReady(torrent);
-                }
+        } else if (engineType === 'torrent-stream') {
+            // Replace torrenter with torrent-stream
+            engine = torrentStream(magnetLink, {
+                connections: connectionLimit,
+                uploads: 0,
+                path: streamPath,
+                tracker: true,
+                dht: false
             });
+            engineInstance = engine; // For torrent-stream, engine is the instance
         } else {
             // Fallback to peerflix
             engine = peerflix(magnetLink, {
@@ -382,21 +382,22 @@ class StreamManager {
                 this.notifyClients(id, 'stream_error', { error: err.message });
             });
             
-        } else if (engineType === 'torrenter') {
-            // Torrenter specific setup
-            streamData.onTorrenterReady = (torrent) => {
+        } else if (engineType === 'torrent-stream') {
+            // Replace torrenter with torrent-stream events
+            engine.on('ready', () => {
                 try {
-                    console.log(`✅ [${id}] Torrenter engine ready`);
-                    const filesCount = torrent.files ? torrent.files.length : 0;
-                    const infoHash = torrent.infoHash || 'unknown';
-                    const totalSize = torrent.length || 0;
+                    console.log(`✅ [${id}] Torrent-stream engine ready`);
+                    
+                    const filesCount = engine.files ? engine.files.length : 0;
+                    const infoHash = engine.torrent ? engine.torrent.infoHash : 'unknown';
+                    const totalSize = engine.torrent ? engine.torrent.length : 0;
 
                     console.log(`📁 [${id}] Total files in torrent: ${filesCount}`);
                     console.log(`🌐 [${id}] Torrent info hash: ${infoHash}`);
                     console.log(`📦 [${id}] Total size: ${(totalSize / 1024 / 1024).toFixed(2)}MB`);
 
-                    if (torrent.files && Array.isArray(torrent.files)) {
-                        torrent.files.forEach((file, index) => {
+                    if (engine.files && Array.isArray(engine.files)) {
+                        engine.files.forEach((file, index) => {
                             const fileName = file && file.name ? file.name : `File ${index}`;
                             const fileSize = file && file.length ? file.length : 0;
                             console.log(`📄 [${id}] File ${index}: ${fileName} (${(fileSize / 1024 / 1024).toFixed(2)}MB)`);
@@ -405,7 +406,7 @@ class StreamManager {
 
                     this.startTorrentMonitoring(streamData);
 
-                    const videoFile = this.findBestVideoFile(torrent.files || [], id);
+                    const videoFile = this.findBestVideoFile(engine.files || [], id);
 
                     if (!videoFile) {
                         streamData.status = 'error';
@@ -433,19 +434,41 @@ class StreamManager {
                     
                     this.notifyClients(id, 'stream_ready', streamData.metadata);
                 } catch (readyError) {
-                    console.error(`❌ [${id}] Error in Torrenter ready handler: ${readyError.message}`);
+                    console.error(`❌ [${id}] Error in torrent-stream ready handler: ${readyError.message}`);
                     streamData.status = 'error';
-                    streamData.error = `Torrenter ready handler error: ${readyError.message}`;
+                    streamData.error = `Torrent-stream ready handler error: ${readyError.message}`;
                     this.notifyClients(id, 'stream_error', { error: streamData.error });
                 }
-            };
+            });
 
+            // Torrent-stream events
             engine.on('error', (err) => {
-                console.error(`❌ [${id}] Torrenter error:`, err.message);
+                console.error(`❌ [${id}] Torrent-stream error:`, err.message);
                 streamData.status = 'error';
                 streamData.error = err.message;
                 streamData.torrentStats.health = 'error';
                 this.notifyClients(id, 'stream_error', { error: err.message });
+            });
+
+            // Download monitoring
+            engine.on('download', (pieceIndex) => {
+                try {
+                    this.updateDiskUsage(streamData);
+                    this.updateTorrentStats(streamData);
+                } catch (downloadError) {
+                    console.error(`❌ [${id}] Error in download handler: ${downloadError.message}`);
+                }
+            });
+
+            // Peer connection events
+            engine.on('peer', (peer) => {
+                try {
+                    const peerAddress = peer && peer.remoteAddress ? peer.remoteAddress : 'unknown';
+                    console.log(`👥 [${id}] New peer connected: ${peerAddress}`);
+                    this.updateTorrentStats(streamData);
+                } catch (peerError) {
+                    console.error(`❌ [${id}] Error in peer handler: ${peerError.message}`);
+                }
             });
         } else {
             // Original peerflix event handling
@@ -652,14 +675,17 @@ class StreamManager {
                 streamData.torrentStats.health = 'error';
             }
             
-        } else if (engineType === 'torrenter') {
+        } else if (engineType === 'torrent-stream') {
             try {
-                const torrent = engineInstance;
-                if (torrent === 'pending' || !torrent) {
+                if (!engine || !engine.swarm || !engine.torrent) {
                     return;
                 }
-                const downloaded = torrent.downloaded || 0;
-                const uploaded = torrent.uploaded || 0;
+
+                const swarm = engine.swarm;
+                const torrent = engine.torrent;
+                
+                const downloaded = swarm.downloaded || 0;
+                const uploaded = swarm.uploaded || 0;
                 const totalLength = torrent.length || 0;
                 const progress = totalLength > 0 ? (downloaded / totalLength) * 100 : 0;
                 const peers = torrent.peers || [];
@@ -725,7 +751,7 @@ class StreamManager {
                     streamData.lastLoggedProgress = progress;
                 }
             } catch (error) {
-                console.error(`❌ [${id}] Error updating Torrenter stats: ${error.message}`);
+                console.error(`❌ [${id}] Error updating torrent-stream stats: ${error.message}`);
                 streamData.torrentStats.health = 'error';
             }
         } else {
@@ -876,8 +902,8 @@ app.post('/api/streams', (req, res) => {
         });
     }
 
-    // Validate engine type
-    const engineType = ['webtorrent', 'torrenter', 'peerflix'].includes(engine) ? engine : 'webtorrent';
+    // Validate engine type (replace 'torrenter' with 'torrent-stream')
+    const engineType = ['webtorrent', 'torrent-stream', 'peerflix'].includes(engine) ? engine : 'webtorrent';
 
     try {
         const stream = streamManager.createStream(magnetLink, clientId, engineType);
