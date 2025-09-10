@@ -868,15 +868,492 @@ class StreamManager {
         }
     }
 
-    // Helper function to format bytes
+    // Add the missing methods to the StreamManager class
+
+    // Add the missing startMonitoringInterval method
+    startMonitoringInterval() {
+        // Clean up old streams and update stats
+        setInterval(() => {
+            this.cleanupOldStreams();
+            this.updateGlobalStats();
+        }, CONFIG.CLEANUP_INTERVAL);
+        
+        console.log(`🔧 Monitoring interval started (cleanup every ${CONFIG.CLEANUP_INTERVAL / 1000}s)`);
+    }
+
+    // Add the missing cleanupOldStreams method
+    cleanupOldStreams() {
+        const now = Date.now();
+        const inactiveThreshold = 30 * 60 * 1000; // 30 minutes
+        
+        for (const [streamId, streamData] of this.activeStreams) {
+            const timeSinceLastAccess = now - streamData.lastAccessed;
+            
+            if (timeSinceLastAccess > inactiveThreshold) {
+                console.log(`🧹 [${streamId}] Cleaning up inactive stream (${Math.round(timeSinceLastAccess / 1000 / 60)}min old)`);
+                this.destroyStream(streamId);
+            }
+        }
+    }
+
+    // Add the missing updateGlobalStats method
+    updateGlobalStats() {
+        // Calculate total disk usage
+        let totalDiskUsage = 0;
+        for (const streamData of this.activeStreams.values()) {
+            totalDiskUsage += streamData.diskUsage || 0;
+        }
+        this.diskUsage = totalDiskUsage;
+        
+        // Log stats periodically
+        if (this.activeStreams.size > 0) {
+            console.log(`📊 Global stats: ${this.activeStreams.size} active streams, ${this.formatBytes(this.diskUsage)} disk usage`);
+        }
+    }
+
+    // Add the missing destroyStream method
+    destroyStream(streamId) {
+        const streamData = this.activeStreams.get(streamId);
+        if (!streamData) {
+            return false;
+        }
+
+        try {
+            console.log(`🗑️ [${streamId}] Destroying stream`);
+
+            // Stop monitoring
+            if (streamData.monitoringInterval) {
+                clearInterval(streamData.monitoringInterval);
+            }
+
+            // Destroy engine
+            if (streamData.engine) {
+                if (typeof streamData.engine.destroy === 'function') {
+                    streamData.engine.destroy();
+                } else if (typeof streamData.engine.remove === 'function') {
+                    streamData.engine.remove();
+                }
+            }
+
+            // Clean up client session
+            if (streamData.clientId && this.clientSessions.has(streamData.clientId)) {
+                this.clientSessions.get(streamData.clientId).delete(streamId);
+                if (this.clientSessions.get(streamData.clientId).size === 0) {
+                    this.clientSessions.delete(streamData.clientId);
+                }
+            }
+
+            // Remove from active streams
+            this.activeStreams.delete(streamId);
+
+            // Notify clients
+            this.notifyClients(streamId, 'stream_destroyed', { streamId });
+
+            return true;
+        } catch (error) {
+            console.error(`❌ [${streamId}] Error destroying stream: ${error.message}`);
+            return false;
+        }
+    }
+
+    // Add the missing getStream method
+    getStream(streamId) {
+        const stream = this.activeStreams.get(streamId);
+        if (stream) {
+            stream.lastAccessed = Date.now();
+        }
+        return stream;
+    }
+
+    // Add the missing getStats method
+    getStats() {
+        const uptime = Date.now() - this.startupTime;
+        
+        return {
+            activeStreams: this.activeStreams.size,
+            connectedClients: this.clientConnections.size,
+            totalDiskUsage: this.diskUsage,
+            uptime: uptime,
+            uptimeFormatted: this.formatUptime(uptime),
+            limits: {
+                maxConcurrentStreams: CONFIG.MAX_CONCURRENT_STREAMS,
+                maxStreamsPerClient: CONFIG.MAX_STREAMS_PER_CLIENT,
+                maxDiskUsage: CONFIG.MAX_DISK_USAGE
+            },
+            load: {
+                percentage: (this.activeStreams.size / CONFIG.MAX_CONCURRENT_STREAMS) * 100,
+                status: this.activeStreams.size === 0 ? 'idle' : 
+                       this.activeStreams.size < CONFIG.MAX_CONCURRENT_STREAMS * 0.5 ? 'light' :
+                       this.activeStreams.size < CONFIG.MAX_CONCURRENT_STREAMS * 0.8 ? 'moderate' : 'heavy'
+            }
+        };
+    }
+
+    // Add the missing notifyClients method
+    notifyClients(streamId, eventType, data) {
+        const streamData = this.activeStreams.get(streamId);
+        if (!streamData) return;
+
+        const clientConnection = this.clientConnections.get(streamData.clientId);
+        if (clientConnection && clientConnection.ws && clientConnection.ws.readyState === 1) {
+            try {
+                clientConnection.ws.send(JSON.stringify({
+                    type: eventType,
+                    streamId: streamId,
+                    data: data,
+                    timestamp: Date.now()
+                }));
+            } catch (error) {
+                console.error(`❌ Error notifying client ${streamData.clientId}: ${error.message}`);
+            }
+        }
+    }
+
+    // Add the missing updateDiskUsage method
+    updateDiskUsage(streamData) {
+        try {
+            if (streamData.path && fs.existsSync(streamData.path)) {
+                const stats = fs.statSync(streamData.path);
+                streamData.diskUsage = stats.size || 0;
+            }
+        } catch (error) {
+            console.error(`❌ [${streamData.id}] Error updating disk usage: ${error.message}`);
+        }
+    }
+
+    // Add the missing findBestVideoFile method
+    findBestVideoFile(files, streamId) {
+        if (!files || !Array.isArray(files) || files.length === 0) {
+            console.log(`❌ [${streamId}] No files array provided`);
+            return null;
+        }
+
+        // Video extensions in order of preference
+        const videoExtensions = ['.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v'];
+        
+        // Filter video files
+        const videoFiles = files.filter(file => {
+            if (!file || !file.name) return false;
+            const ext = path.extname(file.name).toLowerCase();
+            return videoExtensions.includes(ext);
+        });
+
+        if (videoFiles.length === 0) {
+            console.log(`❌ [${streamId}] No video files found`);
+            return null;
+        }
+
+        // Sort by size (largest first) and then by preferred format
+        videoFiles.sort((a, b) => {
+            const aExt = path.extname(a.name).toLowerCase();
+            const bExt = path.extname(b.name).toLowerCase();
+            
+            // Prefer mp4
+            if (aExt === '.mp4' && bExt !== '.mp4') return -1;
+            if (bExt === '.mp4' && aExt !== '.mp4') return 1;
+            
+            // Then by size
+            return (b.length || 0) - (a.length || 0);
+        });
+
+        const selectedFile = videoFiles[0];
+        console.log(`✅ [${streamId}] Selected video file: ${selectedFile.name} (${(selectedFile.length / 1024 / 1024).toFixed(2)}MB)`);
+        
+        return selectedFile;
+    }
+
+    // Add the missing formatUptime method
+    formatUptime(ms) {
+        const seconds = Math.floor(ms / 1000);
+        const minutes = Math.floor(seconds / 60);
+        const hours = Math.floor(minutes / 60);
+        const days = Math.floor(hours / 24);
+
+        if (days > 0) return `${days}d ${hours % 24}h ${minutes % 60}m`;
+        if (hours > 0) return `${hours}h ${minutes % 60}m ${seconds % 60}s`;
+        if (minutes > 0) return `${minutes}m ${seconds % 60}s`;
+        return `${seconds}s`;
+    }
+
+    // Add remuxing helper methods
+    needsRemuxing(videoFile) {
+        if (!CONFIG.ENABLE_REMUXING) return false;
+        
+        const extension = path.extname(videoFile.name || '').toLowerCase().slice(1);
+        const needsRemux = CONFIG.REMUX_FORMATS.includes(extension);
+        
+        console.log(`🔍 File: ${videoFile.name}, Extension: ${extension}, Needs remux: ${needsRemux}`);
+        return needsRemux;
+    }
+
+    async checkFFmpegAvailable() {
+        return new Promise((resolve) => {
+            const ffmpeg = spawn(CONFIG.FFMPEG_PATH, ['-version']);
+            
+            ffmpeg.on('close', (code) => {
+                resolve(code === 0);
+            });
+            
+            ffmpeg.on('error', () => {
+                resolve(false);
+            });
+            
+            // Timeout after 5 seconds
+            setTimeout(() => {
+                ffmpeg.kill();
+                resolve(false);
+            }, 5000);
+        });
+    }
+
+    createRemuxingStream(videoFile, quality = CONFIG.REMUX_QUALITY) {
+        console.log(`🔄 Starting remuxing for: ${videoFile.name} (quality: ${quality})`);
+        
+        const args = [
+            '-i', 'pipe:0', // Read from stdin
+            '-f', 'mp4',    // Output format
+            '-movflags', 'frag_keyframe+empty_moov+faststart', // Streaming optimizations
+            '-avoid_negative_ts', 'make_zero',
+        ];
+
+        // Quality settings
+        switch (quality) {
+            case 'low':
+                args.push(
+                    '-c:v', 'libx264',
+                    '-preset', 'ultrafast',
+                    '-crf', '28',
+                    '-c:a', 'aac',
+                    '-b:a', '128k',
+                    '-ac', '2'
+                );
+                break;
+            case 'high':
+                args.push(
+                    '-c:v', 'libx264',
+                    '-preset', 'fast',
+                    '-crf', '20',
+                    '-c:a', 'aac',
+                    '-b:a', '256k',
+                    '-ac', '2'
+                );
+                break;
+            default: // medium
+                args.push(
+                    '-c:v', 'libx264',
+                    '-preset', 'veryfast',
+                    '-crf', '23',
+                    '-c:a', 'aac',
+                    '-b:a', '192k',
+                    '-ac', '2'
+                );
+        }
+
+        args.push(
+            '-max_muxing_queue_size', '1024',
+            '-fflags', '+genpts',
+            'pipe:1' // Output to stdout
+        );
+
+        console.log(`🔧 FFmpeg command: ${CONFIG.FFMPEG_PATH} ${args.join(' ')}`);
+        
+        const ffmpeg = spawn(CONFIG.FFMPEG_PATH, args, {
+            stdio: ['pipe', 'pipe', 'pipe']
+        });
+
+        // Handle FFmpeg errors
+        ffmpeg.stderr.on('data', (data) => {
+            const message = data.toString();
+            if (message.includes('error') || message.includes('Error')) {
+                console.error(`❌ FFmpeg error: ${message}`);
+            }
+        });
+
+        ffmpeg.on('error', (error) => {
+            console.error(`❌ FFmpeg spawn error: ${error.message}`);
+        });
+
+        ffmpeg.on('close', (code) => {
+            if (code !== 0) {
+                console.error(`❌ FFmpeg exited with code ${code}`);
+            } else {
+                console.log(`✅ FFmpeg completed successfully`);
+            }
+        });
+
+        // Create input stream from video file
+        const inputStream = videoFile.createReadStream();
+        
+        // Pipe input to FFmpeg
+        inputStream.pipe(ffmpeg.stdin);
+        
+        // Handle input stream errors
+        inputStream.on('error', (error) => {
+            console.error(`❌ Input stream error: ${error.message}`);
+            ffmpeg.kill();
+        });
+
+        // Return FFmpeg stdout as the remuxed stream
+        return ffmpeg.stdout;
+    }
+
+    createRangeRemuxingStream(videoFile, start, end, quality = CONFIG.REMUX_QUALITY) {
+        console.log(`🔄 Starting range remuxing for: ${videoFile.name} (${start}-${end}, quality: ${quality})`);
+        
+        const args = [
+            '-i', 'pipe:0',
+            '-ss', Math.max(0, start - 1000000).toString(),
+            '-f', 'mp4',
+            '-movflags', 'frag_keyframe+empty_moov+faststart',
+            '-avoid_negative_ts', 'make_zero',
+        ];
+
+        // Add quality settings
+        switch (quality) {
+            case 'low':
+                args.push(
+                    '-c:v', 'libx264',
+                    '-preset', 'ultrafast',
+                    '-crf', '28',
+                    '-c:a', 'aac',
+                    '-b:a', '128k'
+                );
+                break;
+            case 'high':
+                args.push(
+                    '-c:v', 'libx264',
+                    '-preset', 'fast',
+                    '-crf', '20',
+                    '-c:a', 'aac',
+                    '-b:a', '256k'
+                );
+                break;
+            default:
+                args.push(
+                    '-c:v', 'libx264',
+                    '-preset', 'veryfast',
+                    '-crf', '23',
+                    '-c:a', 'aac',
+                    '-b:a', '192k'
+                );
+        }
+
+        args.push('pipe:1');
+
+        const ffmpeg = spawn(CONFIG.FFMPEG_PATH, args, {
+            stdio: ['pipe', 'pipe', 'pipe']
+        });
+
+        // Handle errors
+        ffmpeg.stderr.on('data', (data) => {
+            const message = data.toString();
+            if (message.includes('error') || message.includes('Error')) {
+                console.error(`❌ FFmpeg range error: ${message}`);
+            }
+        });
+
+        // Create ranged input stream
+        const inputStream = videoFile.createReadStream({ start, end });
+        inputStream.pipe(ffmpeg.stdin);
+
+        inputStream.on('error', (error) => {
+            console.error(`❌ Range input stream error: ${error.message}`);
+            ffmpeg.kill();
+        });
+
+        return ffmpeg.stdout;
+    }
+
+    // Add the missing formatBytes method
     formatBytes(bytes) {
         if (bytes === 0) return '0 B';
         const k = 1024;
-        const sizes = ['B', 'KB', 'MB', 'GB'];
+        const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
         const i = Math.floor(Math.log(bytes) / Math.log(k));
         return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
     }
-} // Close the StreamManager class here
+
+    // Add missing destroyClientStreams method (referenced in WebSocket close handler)
+    destroyClientStreams(clientId) {
+        const clientStreams = this.clientSessions.get(clientId);
+        if (clientStreams) {
+            console.log(`🧹 [${clientId}] Destroying ${clientStreams.size} client streams`);
+            
+            for (const streamId of clientStreams) {
+                this.destroyStream(streamId);
+            }
+            
+            this.clientSessions.delete(clientId);
+        }
+    }
+
+    // Add missing handleStreamAction method (referenced in WebSocket message handler)
+    handleStreamAction(data, clientId) {
+        const { streamId, action, payload } = data;
+        
+        if (!streamId) {
+            console.warn(`⚠️ [${clientId}] Stream action missing streamId`);
+            return;
+        }
+        
+        const stream = this.getStream(streamId);
+        if (!stream) {
+            console.warn(`⚠️ [${clientId}] Stream action for non-existent stream: ${streamId}`);
+            return;
+        }
+        
+        // Verify client owns this stream
+        if (stream.clientId !== clientId) {
+            console.warn(`⚠️ [${clientId}] Unauthorized stream action for: ${streamId}`);
+            return;
+        }
+        
+        console.log(`🎬 [${streamId}] Stream action: ${action} by ${clientId}`);
+        
+        switch (action) {
+            case 'play':
+                // Update last accessed time
+                stream.lastAccessed = Date.now();
+                this.notifyClients(streamId, 'stream_action_result', { 
+                    action: 'play', 
+                    success: true 
+                });
+                break;
+                
+            case 'pause':
+                stream.lastAccessed = Date.now();
+                this.notifyClients(streamId, 'stream_action_result', { 
+                    action: 'pause', 
+                    success: true 
+                });
+                break;
+                
+            case 'seek':
+                const { time } = payload || {};
+                if (typeof time === 'number') {
+                    stream.lastAccessed = Date.now();
+                    console.log(`⏯️ [${streamId}] Seek to: ${time}s`);
+                    this.notifyClients(streamId, 'stream_action_result', { 
+                        action: 'seek', 
+                        time: time, 
+                        success: true 
+                    });
+                } else {
+                    console.warn(`⚠️ [${streamId}] Invalid seek time: ${time}`);
+                }
+                break;
+                
+            case 'destroy':
+                this.destroyStream(streamId);
+                break;
+                
+            default:
+                console.warn(`⚠️ [${streamId}] Unknown stream action: ${action}`);
+        }
+    }
+
+    // ...existing methods like ensureTempDir, addClientConnection, etc.
+}
 
 // Create the stream manager instance
 const streamManager = new StreamManager();
@@ -1200,21 +1677,35 @@ wss.on('connection', (ws, req) => {
         try {
             const data = JSON.parse(message);
             
+            // Update client activity
+            streamManager.updateClientActivity(clientId);
+            
             // Handle different message types
             switch (data.type) {
                 case 'ping':
                     // Simple ping/pong for keep-alive
-                    ws.send(JSON.stringify({ type: 'pong' }));
+                    ws.send(JSON.stringify({ type: 'pong', timestamp: Date.now() }));
                     break;
                 case 'stream_action':
                     // Handle stream actions (play, pause, seek, etc.)
-                    this.handleStreamAction(data, clientId);
+                    streamManager.handleStreamAction(data, clientId);
+                    break;
+                case 'get_stats':
+                    // Send current stats to client
+                    ws.send(JSON.stringify({ 
+                        type: 'stats', 
+                        data: streamManager.getStats() 
+                    }));
                     break;
                 default:
                     console.warn(`⚠️ [${clientId}] Unknown message type: ${data.type}`);
             }
         } catch (e) {
             console.error(`❌ [${clientId}] Message handling error: ${e.message}`);
+            ws.send(JSON.stringify({ 
+                type: 'error', 
+                message: 'Invalid message format' 
+            }));
         }
     });
 
@@ -1224,7 +1715,14 @@ wss.on('connection', (ws, req) => {
         streamManager.removeClientConnection(clientId);
         
         // Optionally, destroy all streams for this client on disconnect
+        // Uncomment the line below if you want to clean up streams when client disconnects
         // streamManager.destroyClientStreams(clientId);
+    });
+
+    // Handle WebSocket errors
+    ws.on('error', (error) => {
+        console.error(`❌ [${clientId}] WebSocket error: ${error.message}`);
+        streamManager.removeClientConnection(clientId);
     });
 });
 
